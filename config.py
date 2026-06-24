@@ -13,7 +13,8 @@ IOU_THRESHOLD: float = 0.45
 
 # Screenshot and recording settings
 SAVE_SCREENSHOTS: bool = True
-ENABLE_RECORDING: bool = True
+# RECORDING SETTINGS: Disabled recording by default to prevent large files
+ENABLE_RECORDING: bool = False
 RECORD_RAW_VIDEO: bool = True  # If True, records raw (clean) camera frames without overlays/annotations.
 SCREENSHOT_DIR: Path = Path("screenshots")
 RECORDING_DIR: Path = Path("recordings")
