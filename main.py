@@ -19,6 +19,9 @@ import uvicorn
 
 import config
 
+# FINGER GESTURE INTEGRATION: Import MediaPipe library for finger landmark detection
+import mediapipe as mp
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -316,7 +319,16 @@ class FloorPositionDetector:
         self.gesture_state: int = 0
         self.hand_previously_raised: bool = False
 
-    def update(self, detections: List[Dict[str, Any]], timestamp: float) -> List[int]:
+        # FINGER GESTURE INTEGRATION: Initialize MediaPipe Hands tracking configuration for counting fingers.
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5
+        )
+
+    def update(self, detections: List[Dict[str, Any]], timestamp: float, frame: Optional[np.ndarray] = None) -> List[int]:
         person_detections = [d for d in detections if d.get("class_name", "").lower() == "person"]
         person_points: List[Tuple[float, float]] = []
 
@@ -331,8 +343,6 @@ class FloorPositionDetector:
 
         ids = self.tracker.assign_ids(person_points, timestamp)
         occupied: Set[int] = set()
-        hand_raised_now = False
-        gesture_occupied = False
 
         for detection, track_id, point in zip(person_detections, ids, person_points):
             detection["track_id"] = track_id
@@ -343,35 +353,34 @@ class FloorPositionDetector:
                 if position.contains(point):
                     occupied.add(position.number)
 
-            # GESTURE DETECTOR INTEGRATION: Run hand-raise checks globally for any person in the frame.
-            kpts = detection.get("keypoints")
-            kpts_conf = detection.get("keypoints_conf")
-            if kpts is not None and kpts_conf is not None and len(kpts) > 10:
-                try:
-                    # Index 5/6: left/right shoulders, Index 9/10: left/right wrists
-                    l_sh, r_sh = kpts[5], kpts[6]
-                    l_wr, r_wr = kpts[9], kpts[10]
-                    l_sh_c, r_sh_c = kpts_conf[5], kpts_conf[6]
-                    l_wr_c, r_wr_c = kpts_conf[9], kpts_conf[10]
+        # FINGER GESTURE INTEGRATION: Process frame with MediaPipe to detect 1 (OFF) or 2 (ON) raised fingers.
+        if frame is not None:
+            try:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = self.hands.process(frame_rgb)
+                if results.multi_hand_landmarks:
+                    for hand_landmarks in results.multi_hand_landmarks:
+                        landmarks = hand_landmarks.landmark
+                        # Check index, middle, ring, pinky fingers status (y tip < y pip)
+                        index_up = landmarks[8].y < landmarks[6].y
+                        middle_up = landmarks[12].y < landmarks[10].y
+                        ring_up = landmarks[16].y < landmarks[14].y
+                        pinky_up = landmarks[20].y < landmarks[18].y
 
-                    # Detect hand raise: checks if the wrist coordinate y is smaller than shoulder y
-                    # (since y-axis grows downwards in screen space) and ensures confidence score is high (>0.5).
-                    left_raised = (l_wr_c > 0.5 and l_sh_c > 0.5 and l_wr[1] < l_sh[1])
-                    right_raised = (r_wr_c > 0.5 and r_sh_c > 0.5 and r_wr[1] < r_sh[1])
+                        up_count = sum([index_up, middle_up, ring_up, pinky_up])
 
-                    if left_raised or right_raised:
-                        hand_raised_now = True
-                except Exception as exc:
-                    logging.warning("Error checking hand raise: %s", exc)
-
-        # GESTURE DETECTOR INTEGRATION: Edge-triggered toggle logic.
-        # Toggles the state (0 -> 1 or 1 -> 0) only on the initial transition from False to True
-        # to prevent continuous rapid toggling while the person keeps their hand raised.
-        if hand_raised_now:
-            if not self.hand_previously_raised:
-                self.gesture_state = 1 - self.gesture_state
-                logging.info("Gesture state toggled to: %d", self.gesture_state)
-        self.hand_previously_raised = hand_raised_now
+                        # Explicit ON/OFF trigger: 2 fingers sets state to 1, 1 finger resets to 0.
+                        if up_count == 2:
+                            if self.gesture_state != 1:
+                                self.gesture_state = 1
+                                logging.info("Gesture state set to: 1 (2 fingers detected)")
+                            break  # Prioritize ON state if multiple hands exist
+                        elif up_count == 1:
+                            if self.gesture_state != 0:
+                                self.gesture_state = 0
+                                logging.info("Gesture state reset to: 0 (1 finger detected)")
+            except Exception as exc:
+                logging.warning("Error checking finger gesture: %s", exc)
 
         self.occupied_positions = sorted(occupied)
         return self.occupied_positions
@@ -787,7 +796,8 @@ class DetectionApp:
 
                 annotated_frame, detections, inference_time, result_timestamp = self.processor.get_results()
                 display_frame = annotated_frame if annotated_frame is not None else frame
-                occupied_positions = self.floor_position_detector.update(detections, time.time())
+                # FINGER GESTURE INTEGRATION: Pass raw frame to update to detect finger landmarks
+                occupied_positions = self.floor_position_detector.update(detections, time.time(), frame)
                 self.floor_position_detector.draw_floor_positions(display_frame)
                 self.floor_position_detector.draw_person_ids(display_frame, detections)
                 class_counts = Counter([item["class_name"] for item in detections])
