@@ -1,0 +1,28 @@
+# YOLO Model Weights
+*.pt
+
+# Python pycache
+__pycache__/
+*.pyc
+
+# Local log files
+logs/
+*.csv
+*.log
+
+# Recordings & Screenshots
+recordings/
+screenshots/
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Editor configurations
+.idea/
+.vscode/
