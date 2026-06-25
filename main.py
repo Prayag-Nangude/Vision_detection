@@ -328,7 +328,7 @@ class FloorPositionDetector:
             min_tracking_confidence=0.5
         )
 
-    def update(self, detections: List[Dict[str, Any]], timestamp: float, frame: Optional[np.ndarray] = None) -> List[int]:
+    def update(self, detections: List[Dict[str, Any]], timestamp: float, frame: Optional[np.ndarray] = None, display_frame: Optional[np.ndarray] = None) -> List[int]:
         person_detections = [d for d in detections if d.get("class_name", "").lower() == "person"]
         person_points: List[Tuple[float, float]] = []
 
@@ -356,6 +356,44 @@ class FloorPositionDetector:
         # FINGER GESTURE INTEGRATION: Process frame with MediaPipe using YOLO Pose crop or whole-screen fallback.
         if frame is not None:
             try:
+                # Helper dictionary for connections to draw skeleton lines
+                HAND_CONNECTIONS = [
+                    (0, 1), (1, 2), (2, 3), (3, 4),
+                    (0, 5), (5, 6), (6, 7), (7, 8),
+                    (5, 9), (9, 10), (10, 11), (11, 12),
+                    (9, 13), (13, 14), (14, 15), (15, 16),
+                    (0, 17), (13, 17), (17, 18), (18, 19), (19, 20)
+                ]
+
+                # Helper to draw hand landmarks and skeletal lines on the display frame
+                def draw_skeletal_hand(landmarks, is_crop: bool, x_start: int = 0, y_start: int = 0, crop_w: int = 0, crop_h: int = 0, index_up: bool = False, middle_up: bool = False, ring_up: bool = False, pinky_up: bool = False):
+                    if display_frame is None:
+                        return
+                    coords = []
+                    for lm in landmarks:
+                        if is_crop:
+                            px = int(x_start + lm.x * crop_w)
+                            py = int(y_start + lm.y * crop_h)
+                        else:
+                            px = int(lm.x * display_frame.shape[1])
+                            py = int(lm.y * display_frame.shape[0])
+                        coords.append((px, py))
+                    
+                    # Draw connection lines (Green skeleton lines)
+                    for start_idx, end_idx in HAND_CONNECTIONS:
+                        if start_idx < len(coords) and end_idx < len(coords):
+                            cv2.line(display_frame, coords[start_idx], coords[end_idx], (0, 255, 0), 2)
+                    
+                    # Draw landmarks (Red knuckle dots)
+                    for idx, (px, py) in enumerate(coords):
+                        cv2.circle(display_frame, (px, py), 4, (0, 0, 255), -1)
+                    
+                    # Draw finger tips in Cyan/Yellow to indicate extended/folded state (Index:8, Middle:12, Ring:16, Pinky:20)
+                    for tip_idx, is_up in [(8, index_up), (12, middle_up), (16, ring_up), (20, pinky_up)]:
+                        if tip_idx < len(coords):
+                            color = (0, 255, 255) if is_up else (0, 0, 255)  # Cyan if up, Red if down
+                            cv2.circle(display_frame, coords[tip_idx], 6, color, -1)
+
                 hand_detected_in_crop = False
                 # Iterate through detections to check wrist keypoints for cropping hand region
                 for detection in person_detections:
@@ -397,6 +435,9 @@ class FloorPositionDetector:
                                                 ring_up = landmarks[16].y < landmarks[14].y
                                                 pinky_up = landmarks[20].y < landmarks[18].y
                                                 
+                                                # Draw skeletal lines & dots on display_frame mapped back from crop
+                                                draw_skeletal_hand(landmarks, True, x_start, y_start, x_end - x_start, y_end - y_start, index_up, middle_up, ring_up, pinky_up)
+
                                                 up_count = sum([index_up, middle_up, ring_up, pinky_up])
                                                 
                                                 # Explicit ON/OFF trigger: 2 fingers sets state to 1, 1 finger resets to 0.
@@ -409,6 +450,7 @@ class FloorPositionDetector:
                                                     if self.gesture_state != 0:
                                                         self.gesture_state = 0
                                                         logging.info("Gesture state reset to: 0 (1 finger detected in wrist crop)")
+                                                    break
                                             if hand_detected_in_crop:
                                                 break
                         if hand_detected_in_crop:
@@ -426,6 +468,9 @@ class FloorPositionDetector:
                             ring_up = landmarks[16].y < landmarks[14].y
                             pinky_up = landmarks[20].y < landmarks[18].y
                             
+                            # Draw skeletal lines & dots on display_frame using full frame coordinates
+                            draw_skeletal_hand(landmarks, False, index_up=index_up, middle_up=middle_up, ring_up=ring_up, pinky_up=pinky_up)
+
                             up_count = sum([index_up, middle_up, ring_up, pinky_up])
                             
                             # Explicit ON/OFF trigger: 2 fingers sets state to 1, 1 finger resets to 0.
@@ -438,6 +483,7 @@ class FloorPositionDetector:
                                 if self.gesture_state != 0:
                                     self.gesture_state = 0
                                     logging.info("Gesture state reset to: 0 (1 finger detected on whole screen)")
+                                break
             except Exception as exc:
                 logging.warning("Error checking finger gesture: %s", exc)
 
@@ -855,8 +901,8 @@ class DetectionApp:
 
                 annotated_frame, detections, inference_time, result_timestamp = self.processor.get_results()
                 display_frame = annotated_frame if annotated_frame is not None else frame
-                # FINGER GESTURE INTEGRATION: Pass raw frame to update to detect finger landmarks
-                occupied_positions = self.floor_position_detector.update(detections, time.time(), frame)
+                # FINGER GESTURE INTEGRATION: Pass raw frame and display frame to update to detect and draw finger landmarks
+                occupied_positions = self.floor_position_detector.update(detections, time.time(), frame, display_frame)
                 self.floor_position_detector.draw_floor_positions(display_frame)
                 self.floor_position_detector.draw_person_ids(display_frame, detections)
                 class_counts = Counter([item["class_name"] for item in detections])
