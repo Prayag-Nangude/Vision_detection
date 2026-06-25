@@ -328,6 +328,54 @@ class FloorPositionDetector:
             min_tracking_confidence=0.5
         )
 
+        # GESTURE SEQUENCE INTEGRATION: Initialize state variables for sequence password detection
+        self.last_stable_count: int = -1
+        self.gesture_history: List[Tuple[int, float]] = []
+        self.consecutive_count: int = 0
+        self.consecutive_val: int = -1
+        self.last_hand_seen_time: float = 0.0
+
+    def _process_finger_count(self, up_count: int, timestamp: float) -> None:
+        # GESTURE DETECTOR INTEGRATION: Sequence-based gesture password processor (3 -> 4 for ON, 4 -> 3 for OFF)
+        self.last_hand_seen_time = timestamp
+
+        # Check for stability of the current finger count
+        if up_count in [3, 4]:
+            if up_count == self.consecutive_val:
+                self.consecutive_count += 1
+            else:
+                self.consecutive_val = up_count
+                self.consecutive_count = 1
+
+            # If stable for at least 2 frames
+            if self.consecutive_count >= 2:
+                if self.last_stable_count != self.consecutive_val:
+                    self.last_stable_count = self.consecutive_val
+                    self.gesture_history.append((self.consecutive_val, timestamp))
+                    # Keep only the last 4 recorded stable counts
+                    self.gesture_history = self.gesture_history[-4:]
+
+                    # Check for trigger sequence
+                    if len(self.gesture_history) >= 2:
+                        g1, t1 = self.gesture_history[-2]
+                        g2, t2 = self.gesture_history[-1]
+                        if t2 - t1 <= 5.0:  # Must complete sequence within 5.0 seconds
+                            if g1 == 3 and g2 == 4:
+                                if self.gesture_state != 1:
+                                    self.gesture_state = 1
+                                    logging.info("Gesture password [3 -> 4] detected! Gesture state set to: 1")
+                                self.gesture_history.clear()
+                                self.last_stable_count = -1
+                            elif g1 == 4 and g2 == 3:
+                                if self.gesture_state != 0:
+                                    self.gesture_state = 0
+                                    logging.info("Gesture password [4 -> 3] detected! Gesture state reset to: 0")
+                                self.gesture_history.clear()
+                                self.last_stable_count = -1
+        else:
+            self.consecutive_val = -1
+            self.consecutive_count = 0
+
     def update(self, detections: List[Dict[str, Any]], timestamp: float, frame: Optional[np.ndarray] = None, display_frame: Optional[np.ndarray] = None) -> List[int]:
         person_detections = [d for d in detections if d.get("class_name", "").lower() == "person"]
         person_points: List[Tuple[float, float]] = []
@@ -399,6 +447,7 @@ class FloorPositionDetector:
                             cv2.circle(display_frame, coords[tip_idx], 6, color, -1)
 
                 hand_detected_in_crop = False
+                hand_detected_overall = False
                 # Iterate through detections to check wrist keypoints for cropping hand region
                 for detection in person_detections:
                     kpts = detection.get("keypoints")
@@ -432,6 +481,7 @@ class FloorPositionDetector:
                                         
                                         if results.multi_hand_landmarks:
                                             hand_detected_in_crop = True
+                                            hand_detected_overall = True
                                             for hand_landmarks in results.multi_hand_landmarks:
                                                 landmarks = hand_landmarks.landmark
                                                 # FINGER GESTURE INTEGRATION: Rotation-invariant distance ratio check (Tip-to-MCP vs 1.3 * PIP-to-MCP)
@@ -445,17 +495,9 @@ class FloorPositionDetector:
 
                                                 up_count = sum([index_up, middle_up, ring_up, pinky_up])
                                                 
-                                                # Explicit ON/OFF trigger: 2 fingers sets state to 1, 1 finger resets to 0.
-                                                if up_count == 2:
-                                                    if self.gesture_state != 1:
-                                                        self.gesture_state = 1
-                                                        logging.info("Gesture state set to: 1 (2 fingers detected in wrist crop)")
-                                                    break
-                                                elif up_count == 1:
-                                                    if self.gesture_state != 0:
-                                                        self.gesture_state = 0
-                                                        logging.info("Gesture state reset to: 0 (1 finger detected in wrist crop)")
-                                                    break
+                                                # GESTURE SEQUENCE INTEGRATION: Call sequence processor with the count of raised fingers
+                                                self._process_finger_count(up_count, timestamp)
+                                                break
                                             if hand_detected_in_crop:
                                                 break
                         if hand_detected_in_crop:
@@ -466,6 +508,7 @@ class FloorPositionDetector:
                     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     results = self.hands.process(frame_rgb)
                     if results.multi_hand_landmarks:
+                        hand_detected_overall = True
                         for hand_landmarks in results.multi_hand_landmarks:
                             landmarks = hand_landmarks.landmark
                             # FINGER GESTURE INTEGRATION: Rotation-invariant distance ratio check (Tip-to-MCP vs 1.3 * PIP-to-MCP)
@@ -479,17 +522,19 @@ class FloorPositionDetector:
 
                             up_count = sum([index_up, middle_up, ring_up, pinky_up])
                             
-                            # Explicit ON/OFF trigger: 2 fingers sets state to 1, 1 finger resets to 0.
-                            if up_count == 2:
-                                if self.gesture_state != 1:
-                                    self.gesture_state = 1
-                                    logging.info("Gesture state set to: 1 (2 fingers detected on whole screen)")
-                                break
-                            elif up_count == 1:
-                                if self.gesture_state != 0:
-                                    self.gesture_state = 0
-                                    logging.info("Gesture state reset to: 0 (1 finger detected on whole screen)")
-                                break
+                            # GESTURE SEQUENCE INTEGRATION: Call sequence processor with the count of raised fingers
+                            self._process_finger_count(up_count, timestamp)
+                            break
+
+                # GESTURE SEQUENCE INTEGRATION: Reset sequence tracker if no hands were detected for more than 5 seconds
+                if not hand_detected_overall:
+                    if timestamp - self.last_hand_seen_time > 5.0:
+                        if self.gesture_history:
+                            self.gesture_history.clear()
+                            logging.info("No hand detected for 5 seconds. Resetting gesture sequence history.")
+                        self.last_stable_count = -1
+                        self.consecutive_val = -1
+                        self.consecutive_count = 0
             except Exception as exc:
                 logging.warning("Error checking finger gesture: %s", exc)
 
