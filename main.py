@@ -365,6 +365,10 @@ class FloorPositionDetector:
                     (0, 17), (13, 17), (17, 18), (18, 19), (19, 20)
                 ]
 
+                # FINGER GESTURE INTEGRATION: Helper to compute 3D distance between landmarks for rotation-invariant check
+                def get_dist_3d(lm1, lm2):
+                    return ((lm1.x - lm2.x)**2 + (lm1.y - lm2.y)**2 + (lm1.z - lm2.z)**2)**0.5
+
                 # Helper to draw hand landmarks and skeletal lines on the display frame
                 def draw_skeletal_hand(landmarks, is_crop: bool, x_start: int = 0, y_start: int = 0, crop_w: int = 0, crop_h: int = 0, index_up: bool = False, middle_up: bool = False, ring_up: bool = False, pinky_up: bool = False):
                     if display_frame is None:
@@ -430,10 +434,11 @@ class FloorPositionDetector:
                                             hand_detected_in_crop = True
                                             for hand_landmarks in results.multi_hand_landmarks:
                                                 landmarks = hand_landmarks.landmark
-                                                index_up = landmarks[8].y < landmarks[6].y
-                                                middle_up = landmarks[12].y < landmarks[10].y
-                                                ring_up = landmarks[16].y < landmarks[14].y
-                                                pinky_up = landmarks[20].y < landmarks[18].y
+                                                # FINGER GESTURE INTEGRATION: Rotation-invariant distance ratio check (Tip-to-MCP vs 1.3 * PIP-to-MCP)
+                                                index_up = get_dist_3d(landmarks[8], landmarks[5]) > 1.3 * get_dist_3d(landmarks[6], landmarks[5])
+                                                middle_up = get_dist_3d(landmarks[12], landmarks[9]) > 1.3 * get_dist_3d(landmarks[10], landmarks[9])
+                                                ring_up = get_dist_3d(landmarks[16], landmarks[13]) > 1.3 * get_dist_3d(landmarks[14], landmarks[13])
+                                                pinky_up = get_dist_3d(landmarks[20], landmarks[17]) > 1.3 * get_dist_3d(landmarks[18], landmarks[17])
                                                 
                                                 # Draw skeletal lines & dots on display_frame mapped back from crop
                                                 draw_skeletal_hand(landmarks, True, x_start, y_start, x_end - x_start, y_end - y_start, index_up, middle_up, ring_up, pinky_up)
@@ -463,10 +468,11 @@ class FloorPositionDetector:
                     if results.multi_hand_landmarks:
                         for hand_landmarks in results.multi_hand_landmarks:
                             landmarks = hand_landmarks.landmark
-                            index_up = landmarks[8].y < landmarks[6].y
-                            middle_up = landmarks[12].y < landmarks[10].y
-                            ring_up = landmarks[16].y < landmarks[14].y
-                            pinky_up = landmarks[20].y < landmarks[18].y
+                            # FINGER GESTURE INTEGRATION: Rotation-invariant distance ratio check (Tip-to-MCP vs 1.3 * PIP-to-MCP)
+                            index_up = get_dist_3d(landmarks[8], landmarks[5]) > 1.3 * get_dist_3d(landmarks[6], landmarks[5])
+                            middle_up = get_dist_3d(landmarks[12], landmarks[9]) > 1.3 * get_dist_3d(landmarks[10], landmarks[9])
+                            ring_up = get_dist_3d(landmarks[16], landmarks[13]) > 1.3 * get_dist_3d(landmarks[14], landmarks[13])
+                            pinky_up = get_dist_3d(landmarks[20], landmarks[17]) > 1.3 * get_dist_3d(landmarks[18], landmarks[17])
                             
                             # Draw skeletal lines & dots on display_frame using full frame coordinates
                             draw_skeletal_hand(landmarks, False, index_up=index_up, middle_up=middle_up, ring_up=ring_up, pinky_up=pinky_up)
