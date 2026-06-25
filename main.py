@@ -353,32 +353,91 @@ class FloorPositionDetector:
                 if position.contains(point):
                     occupied.add(position.number)
 
-        # FINGER GESTURE INTEGRATION: Process frame with MediaPipe to detect 1 (OFF) or 2 (ON) raised fingers.
+        # FINGER GESTURE INTEGRATION: Process frame with MediaPipe using YOLO Pose crop or whole-screen fallback.
         if frame is not None:
             try:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = self.hands.process(frame_rgb)
-                if results.multi_hand_landmarks:
-                    for hand_landmarks in results.multi_hand_landmarks:
-                        landmarks = hand_landmarks.landmark
-                        # Check index, middle, ring, pinky fingers status (y tip < y pip)
-                        index_up = landmarks[8].y < landmarks[6].y
-                        middle_up = landmarks[12].y < landmarks[10].y
-                        ring_up = landmarks[16].y < landmarks[14].y
-                        pinky_up = landmarks[20].y < landmarks[18].y
+                hand_detected_in_crop = False
+                # Iterate through detections to check wrist keypoints for cropping hand region
+                for detection in person_detections:
+                    kpts = detection.get("keypoints")
+                    kpts_conf = detection.get("keypoints_conf")
+                    x1 = float(detection.get("x1", 0))
+                    y1 = float(detection.get("y1", 0))
+                    x2 = float(detection.get("x2", 0))
+                    y2 = float(detection.get("y2", 0))
+                    person_h = y2 - y1
 
-                        up_count = sum([index_up, middle_up, ring_up, pinky_up])
+                    if kpts is not None and kpts_conf is not None:
+                        # Wrist indices: Left wrist is 9, Right wrist is 10
+                        for wrist_idx in [9, 10]:
+                            if wrist_idx < len(kpts) and wrist_idx < len(kpts_conf):
+                                wrist_conf = kpts_conf[wrist_idx]
+                                if wrist_conf > 0.4:
+                                    wrist_x, wrist_y = kpts[wrist_idx][0], kpts[wrist_idx][1]
+                                    # Calculate crop size relative to person height (around 35% of height)
+                                    crop_size = max(64, min(512, int(0.35 * person_h)))
+                                    
+                                    # Calculate crop boundary coordinates
+                                    x_start = max(0, int(wrist_x - crop_size // 2))
+                                    y_start = max(0, int(wrist_y - crop_size // 2))
+                                    x_end = min(frame.shape[1], int(wrist_x + crop_size // 2))
+                                    y_end = min(frame.shape[0], int(wrist_y + crop_size // 2))
+                                    
+                                    if (x_end - x_start) >= 16 and (y_end - y_start) >= 16:
+                                        crop = frame[y_start:y_end, x_start:x_end]
+                                        crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                                        results = self.hands.process(crop_rgb)
+                                        
+                                        if results.multi_hand_landmarks:
+                                            hand_detected_in_crop = True
+                                            for hand_landmarks in results.multi_hand_landmarks:
+                                                landmarks = hand_landmarks.landmark
+                                                index_up = landmarks[8].y < landmarks[6].y
+                                                middle_up = landmarks[12].y < landmarks[10].y
+                                                ring_up = landmarks[16].y < landmarks[14].y
+                                                pinky_up = landmarks[20].y < landmarks[18].y
+                                                
+                                                up_count = sum([index_up, middle_up, ring_up, pinky_up])
+                                                
+                                                # Explicit ON/OFF trigger: 2 fingers sets state to 1, 1 finger resets to 0.
+                                                if up_count == 2:
+                                                    if self.gesture_state != 1:
+                                                        self.gesture_state = 1
+                                                        logging.info("Gesture state set to: 1 (2 fingers detected in wrist crop)")
+                                                    break
+                                                elif up_count == 1:
+                                                    if self.gesture_state != 0:
+                                                        self.gesture_state = 0
+                                                        logging.info("Gesture state reset to: 0 (1 finger detected in wrist crop)")
+                                            if hand_detected_in_crop:
+                                                break
+                        if hand_detected_in_crop:
+                            break
 
-                        # Explicit ON/OFF trigger: 2 fingers sets state to 1, 1 finger resets to 0.
-                        if up_count == 2:
-                            if self.gesture_state != 1:
-                                self.gesture_state = 1
-                                logging.info("Gesture state set to: 1 (2 fingers detected)")
-                            break  # Prioritize ON state if multiple hands exist
-                        elif up_count == 1:
-                            if self.gesture_state != 0:
-                                self.gesture_state = 0
-                                logging.info("Gesture state reset to: 0 (1 finger detected)")
+                # Fallback to whole screen if no hands detected in crops
+                if not hand_detected_in_crop:
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    results = self.hands.process(frame_rgb)
+                    if results.multi_hand_landmarks:
+                        for hand_landmarks in results.multi_hand_landmarks:
+                            landmarks = hand_landmarks.landmark
+                            index_up = landmarks[8].y < landmarks[6].y
+                            middle_up = landmarks[12].y < landmarks[10].y
+                            ring_up = landmarks[16].y < landmarks[14].y
+                            pinky_up = landmarks[20].y < landmarks[18].y
+                            
+                            up_count = sum([index_up, middle_up, ring_up, pinky_up])
+                            
+                            # Explicit ON/OFF trigger: 2 fingers sets state to 1, 1 finger resets to 0.
+                            if up_count == 2:
+                                if self.gesture_state != 1:
+                                    self.gesture_state = 1
+                                    logging.info("Gesture state set to: 1 (2 fingers detected on whole screen)")
+                                break
+                            elif up_count == 1:
+                                if self.gesture_state != 0:
+                                    self.gesture_state = 0
+                                    logging.info("Gesture state reset to: 0 (1 finger detected on whole screen)")
             except Exception as exc:
                 logging.warning("Error checking finger gesture: %s", exc)
 
