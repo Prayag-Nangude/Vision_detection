@@ -318,6 +318,15 @@ class FloorPositionDetector:
         self.occupied_positions: List[int] = []
         self.gesture_state: int = 0
         self.hand_previously_raised: bool = False
+        # ANTIGRAVITY ADDITION: Track whether a person and/or hand is inside the gesture zone
+        self.person_in_gesture_zone: bool = False
+        self.hand_in_gesture_zone: bool = False
+        # ANTIGRAVITY ADDITION: State variables for sequence-based gesture password trigger (3->4 for ON, 4->3 for OFF)
+        self.gesture_sequence: List[int] = []              # History of stable finger counts (e.g. [3, 4] or [4, 3])
+        self.last_stable_finger_count: Optional[int] = None # Current candidate finger count being debounced
+        self.stable_count_frames: int = 0                  # Frame count for debouncing
+        self.last_hand_seen_time: float = 0.0              # Timestamp of last frame with a hand
+        self.last_sequence_time: float = 0.0               # Timestamp of the start of the current sequence
 
         # FINGER GESTURE INTEGRATION: Initialize MediaPipe Hands tracking configuration for counting fingers.
         self.mp_hands = mp.solutions.hands
@@ -329,6 +338,10 @@ class FloorPositionDetector:
         )
 
     def update(self, detections: List[Dict[str, Any]], timestamp: float, frame: Optional[np.ndarray] = None) -> List[int]:
+        # ANTIGRAVITY ADDITION: Reset the zone status flags for this frame
+        self.person_in_gesture_zone = False
+        self.hand_in_gesture_zone = False
+
         person_detections = [d for d in detections if d.get("class_name", "").lower() == "person"]
         person_points: List[Tuple[float, float]] = []
 
@@ -353,13 +366,52 @@ class FloorPositionDetector:
                 if position.contains(point):
                     occupied.add(position.number)
 
+        # ANTIGRAVITY ADDITION: Check if any detected person's bounding box intersects with the gesture zone rectangle
+        rect_x_min, rect_y_min, rect_x_max, rect_y_max = config.GESTURE_ZONE_RECT
+        for detection in person_detections:
+            x1 = float(detection.get("x1", 0))
+            y1 = float(detection.get("y1", 0))
+            x2 = float(detection.get("x2", 0))
+            y2 = float(detection.get("y2", 0))
+            # Overlap exists if they are not completely separated on either axis
+            if not (x2 < rect_x_min or x1 > rect_x_max or y2 < rect_y_min or y1 > rect_y_max):
+                self.person_in_gesture_zone = True
+                break
+
+        current_time = time.time()
+
+        # ANTIGRAVITY ADDITION: Cleanup sequence history and debounce tracker if no hand has been seen for 5.0 seconds
+        if current_time - self.last_hand_seen_time > 5.0:
+            self.gesture_sequence = []
+            self.last_stable_finger_count = None
+            self.stable_count_frames = 0
+
+        # ANTIGRAVITY ADDITION: Cleanup sequence if the sequence itself has timed out (longer than 5.0 seconds since starting)
+        if self.gesture_sequence and (current_time - self.last_sequence_time > 5.0):
+            self.gesture_sequence = []
+
         # FINGER GESTURE INTEGRATION: Process frame with MediaPipe to detect 1 (OFF) or 2 (ON) raised fingers.
-        if frame is not None:
+        # ANTIGRAVITY ADDITION: Run sequence-based gesture trigger logic only if a person intersects with the gesture detection zone rectangle
+        if frame is not None and self.person_in_gesture_zone:
             try:
-                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                results = self.hands.process(frame_rgb)
-                if results.multi_hand_landmarks:
-                    for hand_landmarks in results.multi_hand_landmarks:
+                # Crop gesture zone from the frame
+                h, w = frame.shape[:2]
+                x_start = max(0, min(rect_x_min, w))
+                y_start = max(0, min(rect_y_min, h))
+                x_end = max(0, min(rect_x_max, w))
+                y_end = max(0, min(rect_y_max, h))
+                
+                if (x_end - x_start) >= 16 and (y_end - y_start) >= 16:
+                    crop = frame[y_start:y_end, x_start:x_end]
+                    crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+                    results = self.hands.process(crop_rgb)
+                    if results.multi_hand_landmarks:
+                        # ANTIGRAVITY ADDITION: Mark that a hand/gesture is actively detected inside the zone and update hand tracker timestamp
+                        self.hand_in_gesture_zone = True
+                        self.last_hand_seen_time = current_time
+                        
+                        # Process first detected hand
+                        hand_landmarks = results.multi_hand_landmarks[0]
                         landmarks = hand_landmarks.landmark
                         # Check index, middle, ring, pinky fingers status (y tip < y pip)
                         index_up = landmarks[8].y < landmarks[6].y
@@ -369,16 +421,39 @@ class FloorPositionDetector:
 
                         up_count = sum([index_up, middle_up, ring_up, pinky_up])
 
-                        # Explicit ON/OFF trigger: 2 fingers sets state to 1, 1 finger resets to 0.
-                        if up_count == 2:
-                            if self.gesture_state != 1:
-                                self.gesture_state = 1
-                                logging.info("Gesture state set to: 1 (2 fingers detected)")
-                            break  # Prioritize ON state if multiple hands exist
-                        elif up_count == 1:
-                            if self.gesture_state != 0:
-                                self.gesture_state = 0
-                                logging.info("Gesture state reset to: 0 (1 finger detected)")
+                        # ANTIGRAVITY ADDITION: Debouncing (consecutive frame filtering)
+                        if up_count == self.last_stable_finger_count:
+                            self.stable_count_frames += 1
+                        else:
+                            self.last_stable_finger_count = up_count
+                            self.stable_count_frames = 1
+
+                        # Register count if stable for 2 consecutive frames
+                        if self.stable_count_frames == 2:
+                            stable_count = up_count
+                            
+                            # Only count 3 or 4 fingers as valid sequence inputs
+                            if stable_count in [3, 4]:
+                                # Append to sequence history only if it's different from the last recorded step
+                                if not self.gesture_sequence or self.gesture_sequence[-1] != stable_count:
+                                    if not self.gesture_sequence:
+                                        self.last_sequence_time = current_time  # Start of sequence timer
+                                    self.gesture_sequence.append(stable_count)
+                                    logging.info(f"Registered sequence step: {self.gesture_sequence}")
+
+                                    # Check for ON transition (3 fingers -> 4 fingers)
+                                    if self.gesture_sequence[-2:] == [3, 4]:
+                                        if self.gesture_state != 1:
+                                            self.gesture_state = 1
+                                            logging.info("Gesture state set to: 1 (ON Sequence [3, 4] completed)")
+                                        self.gesture_sequence = []
+
+                                    # Check for OFF transition (4 fingers -> 3 fingers)
+                                    elif self.gesture_sequence[-2:] == [4, 3]:
+                                        if self.gesture_state != 0:
+                                            self.gesture_state = 0
+                                            logging.info("Gesture state reset to: 0 (OFF Sequence [4, 3] completed)")
+                                        self.gesture_sequence = []
             except Exception as exc:
                 logging.warning("Error checking finger gesture: %s", exc)
 
@@ -386,6 +461,30 @@ class FloorPositionDetector:
         return self.occupied_positions
 
     def draw_floor_positions(self, frame: np.ndarray) -> None:
+        # ANTIGRAVITY ADDITION: Draw the gesture detection zone rectangle and its label on the frame (with Grey -> Blue -> Green state colors)
+        rect_x_min, rect_y_min, rect_x_max, rect_y_max = config.GESTURE_ZONE_RECT
+        
+        if self.hand_in_gesture_zone:
+            rect_color = config.GESTURE_ZONE_ACTIVE_COLOR
+        elif self.person_in_gesture_zone:
+            rect_color = config.GESTURE_ZONE_PERSON_COLOR
+        else:
+            rect_color = config.GESTURE_ZONE_DEFAULT_COLOR
+
+        cv2.rectangle(frame, (rect_x_min, rect_y_min), (rect_x_max, rect_y_max), rect_color, config.GESTURE_ZONE_THICKNESS)
+        
+        label_text = "GESTURE ZONE"
+        cv2.putText(
+            frame,
+            label_text,
+            (rect_x_min, max(rect_y_min - 10, 20)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            rect_color,
+            2,
+            cv2.LINE_AA,
+        )
+
         # Draw year floor positions
         for position in self.positions:
             occupied = position.number in self.occupied_positions

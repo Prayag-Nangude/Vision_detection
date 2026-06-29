@@ -79,3 +79,11 @@ FLOOR_POSITION_FONT_THICKNESS: int = 3
 FLOOR_POSITION_LINE_THICKNESS: int = 3
 FLOOR_TRACKER_MAX_DISTANCE: float = 120.0
 FLOOR_TRACKER_TIMEOUT: float = 1.5
+
+# ANTIGRAVITY ADDITION: Config settings for restricting gesture detection to a specific bounding box (Second Branch)
+# Placed to the left of the 2011 circle (center: 2100, 1280) and shifted upwards
+GESTURE_ZONE_RECT: tuple[int, int, int, int] = (1750, 900, 2050, 1200)  # (x_min, y_min, x_max, y_max)
+GESTURE_ZONE_DEFAULT_COLOR: tuple[int, int, int] = (200, 200, 200)       # Grey (idle)
+GESTURE_ZONE_PERSON_COLOR: tuple[int, int, int] = (255, 0, 0)            # Blue (person inside zone)
+GESTURE_ZONE_ACTIVE_COLOR: tuple[int, int, int] = (34, 197, 94)          # Green (gesture detected)
+GESTURE_ZONE_THICKNESS: int = 3
