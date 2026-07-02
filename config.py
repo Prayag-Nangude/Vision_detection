@@ -49,27 +49,30 @@ WEBSERVER_PORT: int = 8000
 ENABLE_OPENCV_WINDOW: bool = True
 
 # Floor position detection settings
-# 1440P OPTIMIZATION: Lays out 16 year circles in two vertical columns shifted to the right side of the screen.
-# Column 1 (2011-2018) is ordered bottom-to-top (2011 at y = 1280, 2018 at y = 160) at x = 2100.
-# Column 2 (2019-2026) is ordered top-to-bottom (2019 at y = 160, 2026 at y = 1280) at x = 2300.
-# Radius is 50px, leaving a little padding of 210px on the far right edge of the 2560px wide screen.
+# DIAGONAL LAYOUT OPTIMIZATION: Lays out 16 year circles along the two floor corridor diagonal paths
+# Column 1 (2011-2018) runs along the bottom-left red line (Nearest to Farthest)
+# Column 2 (2019-2026) runs along the top-right red line (Farthest to Nearest)
+# Radius scales from 40px (background/farthest) to 75px (foreground/nearest) to match camera perspective.
 FLOOR_POSITIONS: list[dict[str, object]] = [
-    {"number": 2011, "center": (2100, 1280), "radius": 50},
-    {"number": 2012, "center": (2100, 1120), "radius": 50},
-    {"number": 2013, "center": (2100, 960), "radius": 50},
-    {"number": 2014, "center": (2100, 800), "radius": 50},
-    {"number": 2015, "center": (2100, 640), "radius": 50},
-    {"number": 2016, "center": (2100, 480), "radius": 50},
-    {"number": 2017, "center": (2100, 320), "radius": 50},
-    {"number": 2018, "center": (2100, 160), "radius": 50},
-    {"number": 2019, "center": (2300, 160), "radius": 50},
-    {"number": 2020, "center": (2300, 320), "radius": 50},
-    {"number": 2021, "center": (2300, 480), "radius": 50},
-    {"number": 2022, "center": (2300, 640), "radius": 50},
-    {"number": 2023, "center": (2300, 800), "radius": 50},
-    {"number": 2024, "center": (2300, 960), "radius": 50},
-    {"number": 2025, "center": (2300, 1120), "radius": 50},
-    {"number": 2026, "center": (2300, 1280), "radius": 50},
+    # Column 1: 2011 to 2018 (Bottom-Left Red Line, from Nearest to Farthest)
+    {"number": 2011, "center": (1570, 1370), "radius": 50},
+    {"number": 2012, "center": (1420, 1263), "radius": 50},
+    {"number": 2013, "center": (1270, 1156), "radius": 50},
+    {"number": 2014, "center": (1120, 1049), "radius": 50},
+    # {"number": 2015, "center": (970, 941), "radius": 55},
+    # {"number": 2016, "center": (820, 834), "radius": 50},
+    # {"number": 2017, "center": (670, 727), "radius": 45},
+    # {"number": 2018, "center": (520, 620), "radius": 40},
+    
+    # Column 2: 2019 to 2026 (Top-Right Red Line, from Farthest to Nearest)
+    {"number": 2019, "center": (640, 580), "radius": 50},
+    {"number": 2020, "center": (791, 687), "radius": 50},
+    {"number": 2021, "center": (943, 794), "radius": 50},
+    {"number": 2022, "center": (1094, 901), "radius": 50},
+    # {"number": 2023, "center": (1246, 1009), "radius": 60},
+    # {"number": 2024, "center": (1397, 1116), "radius": 65},
+    # {"number": 2025, "center": (1549, 1223), "radius": 70},
+    # {"number": 2026, "center": (1700, 1330), "radius": 75},
 ]
 FLOOR_POSITION_COLOR: tuple[int, int, int] = (200, 200, 200)
 FLOOR_OCCUPIED_COLOR: tuple[int, int, int] = (34, 197, 94)

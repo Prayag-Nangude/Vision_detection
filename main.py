@@ -14,6 +14,7 @@ import cv2
 import numpy as np
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from ultralytics import YOLO
 import uvicorn
 
@@ -22,8 +23,6 @@ import config
 # FINGER GESTURE INTEGRATION: Import MediaPipe library for finger landmark detection
 import mediapipe as mp
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 
 class CameraStatus:
@@ -867,6 +866,7 @@ class DetectionApp:
 
     def _shutdown(self) -> None:
         logging.info("Shutting down application")
+        self._stop_web_server()
         self.capture_thread.stop()
         self.processor.stop()
         self.capture_thread.join(timeout=2.0)
