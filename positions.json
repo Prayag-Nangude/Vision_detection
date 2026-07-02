@@ -1,0 +1,74 @@
+{
+  "years": [
+    {
+      "number": 2011,
+      "center": [
+        1570,
+        1370
+      ],
+      "radius": 50
+    },
+    {
+      "number": 2012,
+      "center": [
+        1420,
+        1263
+      ],
+      "radius": 50
+    },
+    {
+      "number": 2013,
+      "center": [
+        1270,
+        1156
+      ],
+      "radius": 50
+    },
+    {
+      "number": 2014,
+      "center": [
+        1120,
+        1049
+      ],
+      "radius": 50
+    },
+    {
+      "number": 2019,
+      "center": [
+        640,
+        580
+      ],
+      "radius": 50
+    },
+    {
+      "number": 2020,
+      "center": [
+        791,
+        687
+      ],
+      "radius": 50
+    },
+    {
+      "number": 2021,
+      "center": [
+        943,
+        794
+      ],
+      "radius": 50
+    },
+    {
+      "number": 2022,
+      "center": [
+        1222,
+        735
+      ],
+      "radius": 50
+    }
+  ],
+  "gesture_zone": [
+    1793,
+    537,
+    2201,
+    837
+  ]
+}

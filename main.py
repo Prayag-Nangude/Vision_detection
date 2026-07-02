@@ -1,5 +1,6 @@
 import csv
 import io
+import json
 import logging
 import threading
 import time
@@ -12,7 +13,7 @@ from typing import Any, Dict, Generator, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
-from fastapi import FastAPI
+from fastapi import FastAPI, Body
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from ultralytics import YOLO
@@ -311,6 +312,7 @@ class PersonTracker:
 class FloorPositionDetector:
     def __init__(self) -> None:
         self.positions = [FloorPosition(**position) for position in config.FLOOR_POSITIONS]
+        self.gesture_zone_rect = list(config.GESTURE_ZONE_RECT)
         # GESTURE DETECTOR INTEGRATION: Removed regional gesture rectangle occupancy tracking.
         # Hand-raise gestures are now monitored screen-wide globally.
         self.tracker = PersonTracker(max_distance=config.FLOOR_TRACKER_MAX_DISTANCE, timeout=config.FLOOR_TRACKER_TIMEOUT)
@@ -326,8 +328,7 @@ class FloorPositionDetector:
         self.stable_count_frames: int = 0                  # Frame count for debouncing
         self.last_hand_seen_time: float = 0.0              # Timestamp of last frame with a hand
         self.last_sequence_time: float = 0.0               # Timestamp of the start of the current sequence
-
-        # FINGER GESTURE INTEGRATION: Initialize MediaPipe Hands tracking configuration for counting fingers.
+ 
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
@@ -335,6 +336,19 @@ class FloorPositionDetector:
             min_detection_confidence=0.5,
             min_tracking_confidence=0.5
         )
+ 
+    def update_positions(self, new_positions: List[Dict[str, Any]], gesture_zone: Optional[List[int]] = None) -> None:
+        updated = []
+        for pos in new_positions:
+            center = tuple(pos["center"]) if isinstance(pos["center"], list) else pos["center"]
+            updated.append(FloorPosition(
+                number=int(pos["number"]),
+                center=center,
+                radius=int(pos["radius"])
+            ))
+        self.positions = updated
+        if gesture_zone is not None:
+            self.gesture_zone_rect = list(gesture_zone)
 
     def update(self, detections: List[Dict[str, Any]], timestamp: float, frame: Optional[np.ndarray] = None) -> List[int]:
         # ANTIGRAVITY ADDITION: Reset the zone status flags for this frame
@@ -366,7 +380,7 @@ class FloorPositionDetector:
                     occupied.add(position.number)
 
         # ANTIGRAVITY ADDITION: Check if any detected person's bounding box intersects with the gesture zone rectangle
-        rect_x_min, rect_y_min, rect_x_max, rect_y_max = config.GESTURE_ZONE_RECT
+        rect_x_min, rect_y_min, rect_x_max, rect_y_max = self.gesture_zone_rect
         for detection in person_detections:
             x1 = float(detection.get("x1", 0))
             y1 = float(detection.get("y1", 0))
@@ -461,7 +475,7 @@ class FloorPositionDetector:
 
     def draw_floor_positions(self, frame: np.ndarray) -> None:
         # ANTIGRAVITY ADDITION: Draw the gesture detection zone rectangle and its label on the frame (with Grey -> Blue -> Green state colors)
-        rect_x_min, rect_y_min, rect_x_max, rect_y_max = config.GESTURE_ZONE_RECT
+        rect_x_min, rect_y_min, rect_x_max, rect_y_max = self.gesture_zone_rect
         
         if self.hand_in_gesture_zone:
             rect_color = config.GESTURE_ZONE_ACTIVE_COLOR
@@ -607,10 +621,112 @@ class DetectionApp:
                         .info-list li {{ display: flex; justify-content: space-between; gap: 16px; padding: 12px 14px; border-radius: 16px; background: rgba(71, 85, 105, 0.16); }}
                         .info-label {{ color: #cbd5e1; }}
                         .info-value {{ color: #fff; font-weight: 600; }}
-                        .live-stream {{ width: 100%; border-radius: 22px; overflow: hidden; background: #020617; border: 1px solid rgba(148,163,184,0.12); }}
-                        .live-stream img {{ width: 100%; height: auto; display: block; }}
+                        
+                        .stream-container {{ position: relative; width: 100%; border-radius: 22px; overflow: hidden; background: #020617; border: 1px solid rgba(148,163,184,0.12); user-select: none; -webkit-user-select: none; }}
+                        .stream-container img {{ width: 100%; height: auto; display: block; user-select: none; -webkit-user-drag: none; }}
+                        
+                        .sticky-stream {{
+                            position: sticky;
+                            top: 24px;
+                        }}
+                        
+                        #editor-list {{
+                            max-height: 400px;
+                            overflow-y: auto;
+                            padding-right: 6px;
+                            display: grid;
+                            gap: 16px;
+                        }}
+                        
+                        #editor-list::-webkit-scrollbar {{
+                            width: 6px;
+                        }}
+                        #editor-list::-webkit-scrollbar-track {{
+                            background: rgba(255, 255, 255, 0.02);
+                            border-radius: 8px;
+                        }}
+                        #editor-list::-webkit-scrollbar-thumb {{
+                            background: rgba(255, 255, 255, 0.1);
+                            border-radius: 8px;
+                        }}
+                        
                         .footer {{ margin-top: 26px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.08); color: #94a3b8; font-size: 0.92rem; }}
                         .hint {{ margin-top: 14px; font-size: 0.95rem; color: #cbd5e1; }}
+                        
+                        .btn-primary {{
+                            background: linear-gradient(135deg, #2563eb, #1d4ed8);
+                            color: #fff;
+                            border: none;
+                            border-radius: 12px;
+                            padding: 8px 16px;
+                            font-size: 0.9rem;
+                            font-weight: 600;
+                            cursor: pointer;
+                            transition: all 0.2s ease;
+                            box-shadow: 0 4px 12px rgba(37,99,235,0.2);
+                            display: flex;
+                            align-items: center;
+                            gap: 6px;
+                        }}
+                        .btn-primary:hover {{
+                            transform: translateY(-1px);
+                            box-shadow: 0 6px 16px rgba(37,99,235,0.3);
+                        }}
+                        .btn-primary.active {{
+                            background: linear-gradient(135deg, #10b981, #059669);
+                            box-shadow: 0 4px 12px rgba(16,185,129,0.2);
+                        }}
+                        .editor-row {{
+                            background: rgba(30, 41, 59, 0.4);
+                            border: 1px solid rgba(148, 163, 184, 0.08);
+                            border-radius: 16px;
+                            padding: 12px;
+                            transition: all 0.2s ease;
+                            cursor: pointer;
+                        }}
+                        .editor-row.selected {{
+                            border-color: #3b82f6;
+                            background: rgba(59, 130, 246, 0.08);
+                        }}
+                        .editor-row-header {{
+                            display: flex;
+                            justify-content: space-between;
+                            font-weight: 700;
+                            margin-bottom: 8px;
+                            font-size: 0.95rem;
+                        }}
+                        .editor-inputs {{
+                            display: grid;
+                            grid-template-columns: repeat(2, 1fr);
+                            gap: 8px;
+                            margin-bottom: 8px;
+                        }}
+                        .editor-input-group {{
+                            display: flex;
+                            align-items: center;
+                            gap: 6px;
+                            font-size: 0.85rem;
+                            color: #94a3b8;
+                        }}
+                        .editor-input-group input {{
+                            width: 100%;
+                            background: #020617;
+                            border: 1px solid rgba(148, 163, 184, 0.15);
+                            border-radius: 8px;
+                            padding: 4px 8px;
+                            color: #fff;
+                            font-size: 0.85rem;
+                        }}
+                        .editor-slider-group {{
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                            font-size: 0.85rem;
+                            color: #94a3b8;
+                        }}
+                        .editor-slider-group input {{
+                            flex: 1;
+                        }}
                     </style>
                 </head>
                 <body>
@@ -624,54 +740,80 @@ class DetectionApp:
                     </header>
                     <main class="container">
                         <div class="panel-grid">
-                            <section class="card">
-                                <h2>Live Stream</h2>
-                                <div class="live-stream">
+                            <section class="card sticky-stream">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                                    <h2 style="margin: 0;">Live Stream</h2>
+                                    <button id="toggle-edit-mode" class="btn-primary" onclick="toggleEditMode()">
+                                        ⚙️ Edit Coordinates
+                                    </button>
+                                </div>
+                                <div class="stream-container">
                                     <img src="/stream" alt="Live YOLO stream" />
+                                    <svg id="interactive-overlay" viewBox="0 0 2560 1440" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none;"></svg>
                                 </div>
                                 <p class="hint">If the stream does not appear, confirm the mobile camera URL is reachable and the service is running.</p>
                             </section>
-                            <aside class="card">
-                                <h2>Live Metrics</h2>
-                                <div class="status-grid">
-                                    <div class="status-card">
-                                        <span class="status-label">Camera status</span>
-                                        <span class="status-value" id="status">Connecting...</span>
+                            
+                            <div>
+                                <aside class="card">
+                                    <h2>Live Metrics</h2>
+                                    <div class="status-grid">
+                                        <div class="status-card">
+                                            <span class="status-label">Camera status</span>
+                                            <span class="status-value" id="status">Connecting...</span>
+                                        </div>
+                                        <div class="status-card">
+                                            <span class="status-label">FPS</span>
+                                            <span class="status-value" id="fps">0</span>
+                                        </div>
+                                        <div class="status-card">
+                                            <span class="status-label">Detections</span>
+                                            <span class="status-value" id="detections">0</span>
+                                        </div>
+                                        <div class="status-card">
+                                            <span class="status-label">Inference time</span>
+                                            <span class="status-value" id="inference">0 ms</span>
+                                        </div>
+                                        <div class="status-card" style="grid-column: span 2;">
+                                            <span class="status-label">Occupied positions</span>
+                                            <span class="status-value" id="occupied">[]</span>
+                                        </div>
+                                        <div class="status-card" style="grid-column: span 2;">
+                                            <span class="status-label">Gesture State</span>
+                                            <span class="status-value" id="gesture">0</span>
+                                        </div>
                                     </div>
-                                    <div class="status-card">
-                                        <span class="status-label">FPS</span>
-                                        <span class="status-value" id="fps">0</span>
+                                    <h2 style="margin-top: 24px;">Model Info</h2>
+                                    <ul class="info-list">
+                                        <li><span class="info-label">Model path</span><strong class="info-value">{self.processor.model_path}</strong></li>
+                                        <li><span class="info-label">Camera URL</span><strong class="info-value">{self.config.CAMERA_SOURCE}</strong></li>
+                                    </ul>
+                                </aside>
+                                
+                                <section id="editor-card" class="card" style="display: none; margin-top: 24px;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                                        <h2 style="margin: 0;">Positions Editor</h2>
+                                        <span id="save-status" style="font-size: 0.85rem; color: #10b981; opacity: 0; transition: opacity 0.5s;">Saved!</span>
                                     </div>
-                                    <div class="status-card">
-                                        <span class="status-label">Detections</span>
-                                        <span class="status-value" id="detections">0</span>
+                                    <div id="editor-list" style="display: grid; gap: 16px;"></div>
+                                    <div style="margin-top: 20px; display: flex; gap: 12px;">
+                                        <button class="btn-primary active" style="flex: 1; justify-content: center;" onclick="saveToServer()">Save Configurations</button>
                                     </div>
-                                    <div class="status-card">
-                                        <span class="status-label">Inference time</span>
-                                        <span class="status-value" id="inference">0 ms</span>
-                                    </div>
-                                    <div class="status-card" style="grid-column: span 2;">
-                                        <span class="status-label">Occupied positions</span>
-                                        <span class="status-value" id="occupied">[]</span>
-                                    </div>
-                                    <!-- GESTURE DETECTOR INTEGRATION: Live metrics dashboard panel to display current gesture state -->
-                                    <div class="status-card" style="grid-column: span 2;">
-                                        <span class="status-label">Gesture State</span>
-                                        <span class="status-value" id="gesture">0</span>
-                                    </div>
-                                </div>
-                                <h2 style="margin-top: 24px;">Model Info</h2>
-                                <ul class="info-list">
-                                    <li><span class="info-label">Model path</span><strong class="info-value">{self.processor.model_path}</strong></li>
-                                    <li><span class="info-label">Camera URL</span><strong class="info-value">{self.config.CAMERA_SOURCE}</strong></li>
-                                </ul>
-                            </aside>
+                                </section>
+                            </div>
                         </div>
                         <div class="footer">
                             <p>Use the keyboard controls in the application window if enabled: Q = Quit, S = Screenshot, R = Reconnect.</p>
                         </div>
                     </main>
                     <script>
+                        let editMode = false;
+                        let positions = [];
+                        let gestureZone = [1750, 900, 2050, 1200];
+                        let selectedIndex = -1; // -2 for gesture zone, -3 for gesture zone resize handle
+                        let isDragging = false;
+                        let dragOffset = {{ x: 0, y: 0 }};
+
                         async function updateStatus() {{
                             try {{
                                 const response = await fetch('/status');
@@ -681,15 +823,430 @@ class DetectionApp:
                                 document.getElementById('fps').textContent = data.fps;
                                 document.getElementById('inference').textContent = data.inference_time_ms + ' ms';
                                 document.getElementById('occupied').textContent = JSON.stringify(data.occupied_positions);
-                                // GESTURE DETECTOR INTEGRATION: Read current gesture toggle value and update the UI element
                                 document.getElementById('gesture').textContent = data.gesture;
                             }} catch (error) {{
                                 document.getElementById('status').textContent = 'Disconnected';
                                 document.getElementById('occupied').textContent = '[]';
-                                // GESTURE DETECTOR INTEGRATION: Fallback default value on network failure
                                 document.getElementById('gesture').textContent = '0';
                             }}
                         }}
+
+                        async function loadPositions() {{
+                            try {{
+                                const response = await fetch('/api/positions');
+                                const data = await response.json();
+                                positions = data.years;
+                                gestureZone = data.gesture_zone;
+                                if (editMode) {{
+                                    renderSVG();
+                                    renderEditorList();
+                                }}
+                            }} catch (error) {{
+                                console.error('Failed to load positions', error);
+                            }}
+                        }}
+
+                        function toggleEditMode() {{
+                            editMode = !editMode;
+                            const btn = document.getElementById('toggle-edit-mode');
+                            const panel = document.getElementById('editor-card');
+                            const overlay = document.getElementById('interactive-overlay');
+
+                            if (editMode) {{
+                                btn.textContent = '🔒 Lock Positions';
+                                btn.classList.add('active');
+                                panel.style.display = 'block';
+                                overlay.style.pointerEvents = 'auto';
+                                loadPositions();
+                            }} else {{
+                                btn.textContent = '⚙️ Edit Coordinates';
+                                btn.classList.remove('active');
+                                panel.style.display = 'none';
+                                overlay.style.pointerEvents = 'none';
+                                overlay.innerHTML = '';
+                                saveToServer();
+                            }}
+                        }}
+
+                        function getSVGCoords(e) {{
+                            const svg = document.getElementById('interactive-overlay');
+                            const rect = svg.getBoundingClientRect();
+                            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                            const x = (clientX - rect.left) * (2560 / rect.width);
+                            const y = (clientY - rect.top) * (1440 / rect.height);
+                            return {{ x: Math.round(x), y: Math.round(y) }};
+                        }}
+
+                        function renderSVG() {{
+                            const overlay = document.getElementById('interactive-overlay');
+                            overlay.innerHTML = '';
+                            if (!editMode) return;
+
+                            // 1. Render Gesture Zone Rectangle
+                            const gzSelected = selectedIndex === -2 || selectedIndex === -3;
+                            const x_min = gestureZone[0];
+                            const y_min = gestureZone[1];
+                            const x_max = gestureZone[2];
+                            const y_max = gestureZone[3];
+                            const width = x_max - x_min;
+                            const height = y_max - y_min;
+
+                            const gzGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                            
+                            const gzRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+                            gzRect.setAttribute('x', x_min);
+                            gzRect.setAttribute('y', y_min);
+                            gzRect.setAttribute('width', width);
+                            gzRect.setAttribute('height', height);
+                            gzRect.setAttribute('fill', gzSelected ? 'rgba(59, 130, 246, 0.15)' : 'rgba(255, 255, 255, 0.05)');
+                            gzRect.setAttribute('stroke', gzSelected ? '#3b82f6' : 'rgba(255, 255, 255, 0.4)');
+                            gzRect.setAttribute('stroke-width', gzSelected ? '4' : '2');
+                            gzRect.setAttribute('stroke-dasharray', '8 4');
+                            gzRect.style.cursor = 'move';
+
+                            const startGZDrag = (e) => {{
+                                e.preventDefault();
+                                selectedIndex = -2;
+                                isDragging = true;
+                                const coords = getSVGCoords(e);
+                                dragOffset.x = coords.x - gestureZone[0];
+                                dragOffset.y = coords.y - gestureZone[1];
+                                renderSVG();
+                                renderEditorList();
+                                highlightRow('gesture');
+                            }};
+                            gzRect.addEventListener('mousedown', startGZDrag);
+                            gzRect.addEventListener('touchstart', startGZDrag);
+                            gzGroup.appendChild(gzRect);
+
+                            const gzText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                            gzText.setAttribute('x', x_min + width / 2);
+                            gzText.setAttribute('y', y_min + height / 2 + 6);
+                            gzText.setAttribute('fill', '#fff');
+                            gzText.setAttribute('font-size', '22px');
+                            gzText.setAttribute('font-weight', 'bold');
+                            gzText.setAttribute('text-anchor', 'middle');
+                            gzText.setAttribute('pointer-events', 'none');
+                            gzText.textContent = 'GESTURE ZONE';
+                            gzGroup.appendChild(gzText);
+
+                            const handle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                            handle.setAttribute('cx', x_max);
+                            handle.setAttribute('cy', y_max);
+                            handle.setAttribute('r', '14');
+                            handle.setAttribute('fill', '#3b82f6');
+                            handle.setAttribute('stroke', '#fff');
+                            handle.setAttribute('stroke-width', '2');
+                            handle.style.cursor = 'se-resize';
+
+                            const startGZResize = (e) => {{
+                                e.preventDefault();
+                                selectedIndex = -3;
+                                isDragging = true;
+                                const coords = getSVGCoords(e);
+                                dragOffset.x = coords.x - gestureZone[2];
+                                dragOffset.y = coords.y - gestureZone[3];
+                                renderSVG();
+                                renderEditorList();
+                                highlightRow('gesture');
+                            }};
+                            handle.addEventListener('mousedown', startGZResize);
+                            handle.addEventListener('touchstart', startGZResize);
+                            gzGroup.appendChild(handle);
+
+                            overlay.appendChild(gzGroup);
+
+                            // 2. Render Year Circles
+                            positions.forEach((pos, idx) => {{
+                                const isSelected = idx === selectedIndex;
+                                const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+                                group.style.cursor = 'move';
+                                
+                                if (isSelected) {{
+                                    const outer = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                                    outer.setAttribute('cx', pos.center[0]);
+                                    outer.setAttribute('cy', pos.center[1]);
+                                    outer.setAttribute('r', pos.radius + 8);
+                                    outer.setAttribute('fill', 'none');
+                                    outer.setAttribute('stroke', '#3b82f6');
+                                    outer.setAttribute('stroke-width', '3');
+                                    outer.setAttribute('stroke-dasharray', '5 3');
+                                    group.appendChild(outer);
+                                }}
+
+                                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                                circle.setAttribute('cx', pos.center[0]);
+                                circle.setAttribute('cy', pos.center[1]);
+                                circle.setAttribute('r', pos.radius);
+                                circle.setAttribute('fill', isSelected ? 'rgba(59, 130, 246, 0.25)' : 'rgba(255, 255, 255, 0.12)');
+                                circle.setAttribute('stroke', isSelected ? '#3b82f6' : '#fff');
+                                circle.setAttribute('stroke-width', isSelected ? '4' : '2');
+
+                                const startDrag = (e) => {{
+                                    e.preventDefault();
+                                    selectedIndex = idx;
+                                    isDragging = true;
+                                    const coords = getSVGCoords(e);
+                                    dragOffset.x = coords.x - pos.center[0];
+                                    dragOffset.y = coords.y - pos.center[1];
+                                    renderSVG();
+                                    renderEditorList();
+                                    highlightRow(idx);
+                                }};
+
+                                circle.addEventListener('mousedown', startDrag);
+                                circle.addEventListener('touchstart', startDrag);
+                                group.appendChild(circle);
+
+                                const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                                text.setAttribute('x', pos.center[0]);
+                                text.setAttribute('y', pos.center[1] + 6);
+                                text.setAttribute('fill', '#fff');
+                                text.setAttribute('font-size', '20px');
+                                text.setAttribute('font-weight', 'bold');
+                                text.setAttribute('text-anchor', 'middle');
+                                text.setAttribute('pointer-events', 'none');
+                                text.textContent = pos.number;
+                                group.appendChild(text);
+
+                                overlay.appendChild(group);
+                            }});
+                        }}
+
+                        function renderEditorList() {{
+                            const list = document.getElementById('editor-list');
+                            list.innerHTML = '';
+
+                            // 1. Render Gesture Zone editor row
+                            const gzSelected = selectedIndex === -2 || selectedIndex === -3;
+                            const gzRow = document.createElement('div');
+                            gzRow.className = 'editor-row' + (gzSelected ? ' selected' : '');
+                            gzRow.id = 'editor-row-gesture';
+                            gzRow.onclick = () => {{
+                                selectedIndex = -2;
+                                renderSVG();
+                                renderEditorList();
+                            }};
+
+                            const gzWidth = gestureZone[2] - gestureZone[0];
+                            const gzHeight = gestureZone[3] - gestureZone[1];
+
+                            gzRow.innerHTML = `
+                                <div class="editor-row-header">
+                                    <span>Gesture Zone (Rectangle)</span>
+                                </div>
+                                <div class="editor-inputs" onclick="event.stopPropagation()">
+                                    <div class="editor-input-group">
+                                        <span>X Min:</span>
+                                        <input type="number" value="${{gestureZone[0]}}" onchange="updateGZCoord(0, this.value)">
+                                    </div>
+                                    <div class="editor-input-group">
+                                        <span>Y Min:</span>
+                                        <input type="number" value="${{gestureZone[1]}}" onchange="updateGZCoord(1, this.value)">
+                                    </div>
+                                    <div class="editor-input-group">
+                                        <span>X Max:</span>
+                                        <input type="number" value="${{gestureZone[2]}}" onchange="updateGZCoord(2, this.value)">
+                                    </div>
+                                    <div class="editor-input-group">
+                                        <span>Y Max:</span>
+                                        <input type="number" value="${{gestureZone[3]}}" onchange="updateGZCoord(3, this.value)">
+                                    </div>
+                                </div>
+                                <div class="editor-slider-group" onclick="event.stopPropagation()">
+                                    <span>Width:</span>
+                                    <input type="range" min="50" max="1000" value="${{gzWidth}}" oninput="updateGZDim('width', this.value)">
+                                    <span>${{gzWidth}}px</span>
+                                </div>
+                                <div class="editor-slider-group" onclick="event.stopPropagation()">
+                                    <span>Height:</span>
+                                    <input type="range" min="50" max="1000" value="${{gzHeight}}" oninput="updateGZDim('height', this.value)">
+                                    <span>${{gzHeight}}px</span>
+                                </div>
+                            `;
+                            list.appendChild(gzRow);
+
+                            // 2. Render Year Circles
+                            positions.forEach((pos, idx) => {{
+                                const isSelected = idx === selectedIndex;
+                                const row = document.createElement('div');
+                                row.className = 'editor-row' + (isSelected ? ' selected' : '');
+                                row.id = `editor-row-${{idx}}`;
+                                row.onclick = () => {{
+                                    selectedIndex = idx;
+                                    renderSVG();
+                                    renderEditorList();
+                                }};
+
+                                row.innerHTML = `
+                                    <div class="editor-row-header">
+                                        <span>Year ${{pos.number}}</span>
+                                    </div>
+                                    <div class="editor-inputs" onclick="event.stopPropagation()">
+                                        <div class="editor-input-group">
+                                            <span>X:</span>
+                                            <input type="number" value="${{pos.center[0]}}" onchange="updateCoord(${{idx}}, 0, this.value)">
+                                        </div>
+                                        <div class="editor-input-group">
+                                            <span>Y:</span>
+                                            <input type="number" value="${{pos.center[1]}}" onchange="updateCoord(${{idx}}, 1, this.value)">
+                                        </div>
+                                    </div>
+                                    <div class="editor-slider-group" onclick="event.stopPropagation()">
+                                        <span>Radius:</span>
+                                        <input type="range" min="20" max="150" value="${{pos.radius}}" oninput="updateRadius(${{idx}}, this.value)">
+                                        <span>${{pos.radius}}px</span>
+                                    </div>
+                                `;
+                                list.appendChild(row);
+                            }});
+                        }}
+
+                        function highlightRow(idx) {{
+                            const container = document.getElementById('editor-list');
+                            const row = document.getElementById(idx === 'gesture' ? 'editor-row-gesture' : `editor-row-${{idx}}`);
+                            if (container && row) {{
+                                const containerTop = container.scrollTop;
+                                const containerBottom = containerTop + container.clientHeight;
+                                const elemTop = row.offsetTop;
+                                const elemBottom = elemTop + row.offsetHeight;
+                                if (elemTop < containerTop) {{
+                                    container.scrollTop = elemTop;
+                                }} else if (elemBottom > containerBottom) {{
+                                    container.scrollTop = elemBottom - container.clientHeight;
+                                }}
+                            }}
+                        }}
+
+                        function updateCoord(idx, coordIdx, val) {{
+                            positions[idx].center[coordIdx] = parseInt(val) || 0;
+                            renderSVG();
+                            saveToServer();
+                        }}
+
+                        function updateRadius(idx, val) {{
+                            positions[idx].radius = parseInt(val) || 50;
+                            renderSVG();
+                            renderEditorList();
+                            saveToServer();
+                        }}
+
+                        function updateGZCoord(idx, val) {{
+                            gestureZone[idx] = parseInt(val) || 0;
+                            renderSVG();
+                            saveToServer();
+                        }}
+
+                        function updateGZDim(dim, val) {{
+                            const parsed = parseInt(val) || 50;
+                            if (dim === 'width') {{
+                                gestureZone[2] = gestureZone[0] + parsed;
+                            }} else {{
+                                gestureZone[3] = gestureZone[1] + parsed;
+                            }}
+                            renderSVG();
+                            renderEditorList();
+                            saveToServer();
+                        }}
+
+                        window.addEventListener('mousemove', (e) => {{
+                            if (!isDragging || selectedIndex === -1) return;
+                            e.preventDefault();
+                            const coords = getSVGCoords(e);
+                            
+                            if (selectedIndex === -2) {{
+                                const width = gestureZone[2] - gestureZone[0];
+                                const height = gestureZone[3] - gestureZone[1];
+                                const newX = Math.max(0, Math.min(2560 - width, coords.x - dragOffset.x));
+                                const newY = Math.max(0, Math.min(1440 - height, coords.y - dragOffset.y));
+                                gestureZone[0] = newX;
+                                gestureZone[1] = newY;
+                                gestureZone[2] = newX + width;
+                                gestureZone[3] = newY + height;
+                                renderSVG();
+                                renderEditorList();
+                            }} else if (selectedIndex === -3) {{
+                                const newMaxX = Math.max(gestureZone[0] + 50, Math.min(2560, coords.x - dragOffset.x));
+                                const newMaxY = Math.max(gestureZone[1] + 50, Math.min(1440, coords.y - dragOffset.y));
+                                gestureZone[2] = newMaxX;
+                                gestureZone[3] = newMaxY;
+                                renderSVG();
+                                renderEditorList();
+                            }} else {{
+                                positions[selectedIndex].center[0] = Math.max(0, Math.min(2560, coords.x - dragOffset.x));
+                                positions[selectedIndex].center[1] = Math.max(0, Math.min(1440, coords.y - dragOffset.y));
+                                renderSVG();
+                                renderEditorList();
+                            }}
+                        }});
+
+                        window.addEventListener('touchmove', (e) => {{
+                            if (!isDragging || selectedIndex === -1) return;
+                            e.preventDefault();
+                            const coords = getSVGCoords(e);
+                            
+                            if (selectedIndex === -2) {{
+                                const width = gestureZone[2] - gestureZone[0];
+                                const height = gestureZone[3] - gestureZone[1];
+                                const newX = Math.max(0, Math.min(2560 - width, coords.x - dragOffset.x));
+                                const newY = Math.max(0, Math.min(1440 - height, coords.y - dragOffset.y));
+                                gestureZone[0] = newX;
+                                gestureZone[1] = newY;
+                                gestureZone[2] = newX + width;
+                                gestureZone[3] = newY + height;
+                                renderSVG();
+                                renderEditorList();
+                            }} else if (selectedIndex === -3) {{
+                                const newMaxX = Math.max(gestureZone[0] + 50, Math.min(2560, coords.x - dragOffset.x));
+                                const newMaxY = Math.max(gestureZone[1] + 50, Math.min(1440, coords.y - dragOffset.y));
+                                gestureZone[2] = newMaxX;
+                                gestureZone[3] = newMaxY;
+                                renderSVG();
+                                renderEditorList();
+                            }} else {{
+                                positions[selectedIndex].center[0] = Math.max(0, Math.min(2560, coords.x - dragOffset.x));
+                                positions[selectedIndex].center[1] = Math.max(0, Math.min(1440, coords.y - dragOffset.y));
+                                renderSVG();
+                                renderEditorList();
+                            }}
+                        }}, {{ passive: false }});
+
+                        const stopDrag = () => {{
+                            if (isDragging) {{
+                                isDragging = false;
+                                saveToServer();
+                            }}
+                        }};
+                        window.addEventListener('mouseup', stopDrag);
+                        window.addEventListener('touchend', stopDrag);
+
+                        let saveTimeout;
+                        function saveToServer() {{
+                            clearTimeout(saveTimeout);
+                            saveTimeout = setTimeout(async () => {{
+                                try {{
+                                    const payload = {{
+                                        years: positions,
+                                        gesture_zone: gestureZone
+                                    }};
+                                    const response = await fetch('/api/positions', {{
+                                        method: 'POST',
+                                        headers: {{ 'Content-Type': 'application/json' }},
+                                        body: JSON.stringify(payload)
+                                    }});
+                                    const result = await response.json();
+                                    if (result.status === 'success') {{
+                                        const statusEl = document.getElementById('save-status');
+                                        statusEl.style.opacity = '1';
+                                        setTimeout(() => statusEl.style.opacity = '0', 2000);
+                                    }}
+                                }} catch (error) {{
+                                    console.error('Failed to save positions to server', error);
+                                }}
+                            }}, 300);
+                        }}
+
                         setInterval(updateStatus, 1500);
                         updateStatus();
                     </script>
@@ -716,6 +1273,52 @@ class DetectionApp:
                 "gesture": self.floor_position_detector.gesture_state,
                 "model": self.processor.model_path,
             }
+
+        @app.get("/api/positions")
+        async def get_positions() -> Dict[str, Any]:
+            return {
+                "years": [
+                    {
+                        "number": pos.number,
+                        "center": list(pos.center),
+                        "radius": pos.radius
+                    }
+                    for pos in self.floor_position_detector.positions
+                ],
+                "gesture_zone": list(self.floor_position_detector.gesture_zone_rect)
+            }
+
+        @app.post("/api/positions")
+        async def save_positions(payload: Any = Body(...)) -> Dict[str, str]:
+            try:
+                new_positions = []
+                gesture_zone = None
+                
+                if isinstance(payload, list):
+                    new_positions = payload
+                elif isinstance(payload, dict):
+                    new_positions = payload.get("years", [])
+                    gesture_zone = payload.get("gesture_zone", None)
+                
+                self.floor_position_detector.update_positions(new_positions, gesture_zone)
+                
+                serializable = {
+                    "years": [
+                        {
+                            "number": int(pos["number"]),
+                            "center": list(pos["center"]),
+                            "radius": int(pos["radius"])
+                        }
+                        for pos in new_positions
+                    ],
+                    "gesture_zone": list(self.floor_position_detector.gesture_zone_rect)
+                }
+                with open(config.POSITIONS_FILE, "w") as f:
+                    json.dump(serializable, f, indent=2)
+                return {"status": "success", "message": "Positions saved successfully"}
+            except Exception as e:
+                logging.error(f"Failed to save positions: {e}")
+                return {"status": "error", "message": str(e)}
 
         return app
 
