@@ -374,10 +374,46 @@ class FloorPositionDetector:
             detection["track_id"] = track_id
             detection["foot_point"] = point
 
-            # Check year floor circles
-            for position in self.positions:
-                if position.contains(point):
-                    occupied.add(position.number)
+            # POSE-BASED OCCUPANCY: Try using left/right ankles from YOLO Pose before falling back
+            keypoints = detection.get("keypoints")
+            keypoints_conf = detection.get("keypoints_conf")
+            used_pose = False
+
+            if keypoints is not None and keypoints_conf is not None:
+                # POSE-BASED OCCUPANCY: Check if keypoints arrays have enough elements (Left Ankle = 15, Right Ankle = 16)
+                if len(keypoints) > 16 and len(keypoints_conf) > 16:
+                    left_ankle, right_ankle = keypoints[15], keypoints[16]
+                    left_conf, right_conf = keypoints_conf[15], keypoints_conf[16]
+                    conf_threshold = 0.5 # Min confidence to trust the keypoint detection
+
+                    # POSE-BASED OCCUPANCY: Validate keypoint confidence and ensure coordinate validity
+                    valid_left = left_conf > conf_threshold and left_ankle[0] > 0 and left_ankle[1] > 0
+                    valid_right = right_conf > conf_threshold and right_ankle[0] > 0 and right_ankle[1] > 0
+
+                    if valid_left or valid_right:
+                        used_pose = True # Set flag to skip standard bounding box fallback
+                        # POSE-BASED OCCUPANCY: Check each year circle against left and right ankles independently
+                        for position in self.positions:
+                            is_inside = False
+                            if valid_left:
+                                dx_l = left_ankle[0] - position.center[0]
+                                dy_l = left_ankle[1] - position.center[1]
+                                if dx_l * dx_l + dy_l * dy_l <= position.radius * position.radius:
+                                    is_inside = True
+                            if not is_inside and valid_right:
+                                dx_r = right_ankle[0] - position.center[0]
+                                dy_r = right_ankle[1] - position.center[1]
+                                if dx_r * dx_r + dy_r * dy_r <= position.radius * position.radius:
+                                    is_inside = True
+                            if is_inside:
+                                occupied.add(position.number)
+
+            # POSE-BASED OCCUPANCY: Standard fallback to bounding box bottom-center if pose is unavailable/low confidence
+            if not used_pose:
+                # Check year floor circles using default midpoint
+                for position in self.positions:
+                    if position.contains(point):
+                        occupied.add(position.number)
 
         # ANTIGRAVITY ADDITION: Check if any detected person's bounding box intersects with the gesture zone rectangle
         rect_x_min, rect_y_min, rect_x_max, rect_y_max = self.gesture_zone_rect
