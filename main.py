@@ -1535,6 +1535,8 @@ class DetectionApp:
             f"Occupied positions: {occupied_positions}",
             # GESTURE DETECTOR INTEGRATION: Render the gesture state onto the video frame overlay
             f"Gesture: {self.floor_position_detector.gesture_state}",
+            # POSE-BASED OCCUPANCY: Draw the active video stopped years array on the frame overlay
+            f"Video: {self.floor_position_detector.video_years}",
             f"Time: {timestamp}",
         ]
 
