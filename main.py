@@ -5,7 +5,7 @@ import logging
 import threading
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from math import hypot
 from pathlib import Path
@@ -264,6 +264,8 @@ class TrackedPerson:
     track_id: int
     last_position: Tuple[float, float]
     last_seen: float
+    # POSE-BASED OCCUPANCY: History list of right wrist coordinates (x, y, timestamp) for swipe detection
+    right_wrist_history: List[Tuple[float, float, float]] = field(default_factory=list)
 
 
 class PersonTracker:
@@ -318,6 +320,8 @@ class FloorPositionDetector:
         self.tracker = PersonTracker(max_distance=config.FLOOR_TRACKER_MAX_DISTANCE, timeout=config.FLOOR_TRACKER_TIMEOUT)
         self.occupied_positions: List[int] = []
         self.gesture_state: int = 0
+        # POSE-BASED OCCUPANCY: Array representing occupied years where a chest-level hand-raise gesture is active (video stopped)
+        self.video_years: List[int] = []
         self.hand_previously_raised: bool = False
         # ANTIGRAVITY ADDITION: Track whether a person and/or hand is inside the gesture zone
         self.person_in_gesture_zone: bool = False
@@ -392,6 +396,7 @@ class FloorPositionDetector:
 
                     if valid_left or valid_right:
                         used_pose = True # Set flag to skip standard bounding box fallback
+                        standing_years = [] # List to track which years this specific person occupies
                         # POSE-BASED OCCUPANCY: Check each year circle against left and right ankles independently
                         for position in self.positions:
                             is_inside = False
@@ -407,6 +412,70 @@ class FloorPositionDetector:
                                     is_inside = True
                             if is_inside:
                                 occupied.add(position.number)
+                                standing_years.append(position.number) # Record year occupied
+
+                        # POSE-BASED OCCUPANCY: Process chest-level hand-raise and right hand swipe gestures if person is tracked
+                        track = self.tracker.tracks.get(track_id)
+                        
+                        # POSE-BASED OCCUPANCY: Extract shoulder, hip, and wrist coordinates on left/right sides
+                        left_shoulder, right_shoulder = keypoints[5], keypoints[6]
+                        left_hip, right_hip = keypoints[11], keypoints[12]
+                        left_wrist, right_wrist = keypoints[9], keypoints[10]
+
+                        left_shoulder_conf = keypoints_conf[5]
+                        right_shoulder_conf = keypoints_conf[6]
+                        left_hip_conf = keypoints_conf[11]
+                        right_hip_conf = keypoints_conf[12]
+                        left_wrist_conf = keypoints_conf[9]
+                        right_wrist_conf = keypoints_conf[10]
+
+                        # POSE-BASED OCCUPANCY: Check left hand raised to chest/mid-body level
+                        left_hand_raised = False
+                        if left_shoulder_conf > 0.5 and left_hip_conf > 0.5 and left_wrist_conf > 0.5:
+                            chest_y_l = (left_shoulder[1] + left_hip[1]) / 2.0
+                            if left_wrist[1] < chest_y_l and left_wrist[0] > 0 and left_wrist[1] > 0:
+                                left_hand_raised = True
+
+                        # POSE-BASED OCCUPANCY: Check right hand raised to chest/mid-body level
+                        right_hand_raised = False
+                        if right_shoulder_conf > 0.5 and right_hip_conf > 0.5 and right_wrist_conf > 0.5:
+                            chest_y_r = (right_shoulder[1] + right_hip[1]) / 2.0
+                            if right_wrist[1] < chest_y_r and right_wrist[0] > 0 and right_wrist[1] > 0:
+                                right_hand_raised = True
+
+                        # POSE-BASED OCCUPANCY: Add standing years to video array if hand raise is detected
+                        if (left_hand_raised or right_hand_raised) and standing_years:
+                            for y in standing_years:
+                                if y not in self.video_years:
+                                    self.video_years.append(y)
+                                    logging.info(f"POSE-BASED OCCUPANCY: Year {y} added to video array (chest-level hand-raise)")
+
+                        # POSE-BASED OCCUPANCY: Track right wrist coordinate history for swipe detection
+                        if track is not None and right_wrist_conf > 0.5 and right_wrist[0] > 0 and right_wrist[1] > 0:
+                            current_time = time.time()
+                            track.right_wrist_history.append((right_wrist[0], right_wrist[1], current_time))
+                            # Keep only history from the last 0.8 seconds to avoid stale calculations
+                            track.right_wrist_history = [
+                                item for item in track.right_wrist_history
+                                if current_time - item[2] <= 0.8
+                            ]
+
+                            # POSE-BASED OCCUPANCY: Detect horizontal swipe (large X diff, small Y diff, short time window)
+                            if len(track.right_wrist_history) >= 5:
+                                oldest = track.right_wrist_history[0]
+                                newest = track.right_wrist_history[-1]
+                                dx_swipe = newest[0] - oldest[0]
+                                dy_swipe = newest[1] - oldest[1]
+                                dt_swipe = newest[2] - oldest[2]
+
+                                if 0.05 < dt_swipe < 0.6:
+                                    if abs(dx_swipe) > 120 and abs(dy_swipe) < 80:
+                                        # POSE-BASED OCCUPANCY: Right swipe detected, clear history to prevent multiple triggers
+                                        track.right_wrist_history = []
+                                        for y in standing_years:
+                                            if y in self.video_years:
+                                                self.video_years.remove(y)
+                                                logging.info(f"POSE-BASED OCCUPANCY: Year {y} removed from video array (right swipe)")
 
             # POSE-BASED OCCUPANCY: Standard fallback to bounding box bottom-center if pose is unavailable/low confidence
             if not used_pose:
@@ -469,6 +538,10 @@ class FloorPositionDetector:
                         pinky_up = landmarks[20].y < landmarks[18].y
 
                         up_count = sum([index_up, middle_up, ring_up, pinky_up])
+
+                        # POSE-BASED OCCUPANCY: Enforce that a 3-finger count must strictly match Option B (Index folded, others extended)
+                        if up_count == 3 and not (not index_up and middle_up and ring_up and pinky_up):
+                            up_count = 0
 
                         # ANTIGRAVITY ADDITION: Debouncing (consecutive frame filtering)
                         if up_count == self.last_stable_finger_count:
@@ -1307,6 +1380,8 @@ class DetectionApp:
                 "occupied_positions": self.floor_position_detector.occupied_positions,
                 # GESTURE DETECTOR INTEGRATION: Return the current hand-raise gesture toggle value (0 or 1)
                 "gesture": self.floor_position_detector.gesture_state,
+                # POSE-BASED OCCUPANCY: Return the array of years where video has been stopped by hand gesture
+                "video": self.floor_position_detector.video_years,
                 "model": self.processor.model_path,
             }
 
