@@ -1,74 +1,74 @@
 {
   "years": [
     {
-      "number": 2011,
+      "number": 1995,
       "center": [
-        1570,
-        1370
+        1761,
+        1329
       ],
-      "radius": 50
+      "radius": 89
     },
     {
-      "number": 2012,
+      "number": 1999,
       "center": [
-        1420,
-        1263
+        1426,
+        1043
       ],
-      "radius": 50
+      "radius": 85
     },
     {
-      "number": 2013,
+      "number": 2003,
       "center": [
-        1270,
-        1156
+        1207,
+        772
       ],
-      "radius": 50
+      "radius": 80
     },
     {
-      "number": 2014,
+      "number": 2007,
       "center": [
-        1120,
-        1049
+        1034,
+        585
       ],
-      "radius": 50
+      "radius": 78
     },
     {
-      "number": 2019,
+      "number": 2005,
       "center": [
-        640,
-        580
+        1380,
+        674
       ],
-      "radius": 50
+      "radius": 77
     },
     {
-      "number": 2020,
+      "number": 2001,
       "center": [
-        791,
-        687
+        1592,
+        917
       ],
-      "radius": 50
+      "radius": 83
     },
     {
-      "number": 2021,
+      "number": 1997,
       "center": [
-        943,
-        794
+        1901,
+        1168
       ],
-      "radius": 50
+      "radius": 81
     },
     {
-      "number": 2022,
+      "number": 2009,
       "center": [
-        1222,
-        735
+        1216,
+        485
       ],
-      "radius": 50
+      "radius": 80
     }
   ],
   "gesture_zone": [
-    1793,
-    537,
-    2201,
-    837
+    1750,
+    2,
+    2270,
+    478
   ]
 }

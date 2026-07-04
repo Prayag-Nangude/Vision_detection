@@ -1,7 +1,7 @@
 from pathlib import Path
 
 # General camera settings
-CAMERA_SOURCE: str = "rtsp://admin:Admin@123@192.168.4.148:554/Streaming/Channels/101"
+CAMERA_SOURCE: str = "rtsp://admin:Admin@123@192.168.0.148:554/Streaming/Channels/101"
 # CAMERA_SOURCE: int = 0 
 
 # Model settings
