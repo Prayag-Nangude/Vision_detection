@@ -554,8 +554,8 @@ class FloorPositionDetector:
                         if self.stable_count_frames == 2:
                             stable_count = up_count
                             
-                            # Only count 3 or 4 fingers as valid sequence inputs
-                            if stable_count in [3, 4]:
+                            # Only count 1, 2, 3 or 4 fingers as valid sequence inputs
+                            if stable_count in [1, 2, 3, 4]:
                                 # Append to sequence history only if it's different from the last recorded step
                                 if not self.gesture_sequence or self.gesture_sequence[-1] != stable_count:
                                     if not self.gesture_sequence:
@@ -575,6 +575,13 @@ class FloorPositionDetector:
                                         if self.gesture_state != 0:
                                             self.gesture_state = 0
                                             logging.info("Gesture state reset to: 0 (OFF Sequence [4, 3] completed)")
+                                        self.gesture_sequence = []
+
+                                    # SECOND GESTURE SEQUENCE: Check for state-2 transition (1 finger -> 2 fingers)
+                                    elif self.gesture_sequence[-2:] == [1, 2]:
+                                        if self.gesture_state != 2:
+                                            self.gesture_state = 2
+                                            logging.info("Gesture state set to: 2 (Sequence [1, 2] completed)")
                                         self.gesture_sequence = []
             except Exception as exc:
                 logging.warning("Error checking finger gesture: %s", exc)
