@@ -264,8 +264,11 @@ class TrackedPerson:
     track_id: int
     last_position: Tuple[float, float]
     last_seen: float
-    # POSE-BASED OCCUPANCY: History list of right wrist coordinates (x, y, timestamp) for swipe detection
-    right_wrist_history: List[Tuple[float, float, float]] = field(default_factory=list)
+    # HAND-RAISE TOGGLE: Per-person state for the edge-triggered single-hand-raise year toggle.
+    hand_currently_up: bool = False          # Hysteretic raised/lowered state of the hand
+    hand_up_since: Optional[float] = None    # Timestamp the current (armed) raise began; None when down/consumed
+    toggle_armed: bool = True                # True when ready to accept a new raise (re-armed after lowering)
+    last_toggle_time: float = 0.0            # Timestamp of the last toggle (for cooldown)
 
 
 class PersonTracker:
@@ -414,68 +417,77 @@ class FloorPositionDetector:
                                 occupied.add(position.number)
                                 standing_years.append(position.number) # Record year occupied
 
-                        # POSE-BASED OCCUPANCY: Process chest-level hand-raise and right hand swipe gestures if person is tracked
+                        # HAND-RAISE TOGGLE: A single-hand raise toggles the standing year(s) in/out of the
+                        # video array. Replaces the old add-on-raise + swipe-to-remove logic (which collided:
+                        # a swipe was read as a raise). Uses wrist-above-shoulder (hip fallback at far circles),
+                        # an edge-triggered hold, and a re-arm-on-lower step so one raise == one toggle.
                         track = self.tracker.tracks.get(track_id)
-                        
-                        # POSE-BASED OCCUPANCY: Extract shoulder, hip, and wrist coordinates on left/right sides
+
                         left_shoulder, right_shoulder = keypoints[5], keypoints[6]
                         left_hip, right_hip = keypoints[11], keypoints[12]
                         left_wrist, right_wrist = keypoints[9], keypoints[10]
 
-                        left_shoulder_conf = keypoints_conf[5]
-                        right_shoulder_conf = keypoints_conf[6]
-                        left_hip_conf = keypoints_conf[11]
-                        right_hip_conf = keypoints_conf[12]
-                        left_wrist_conf = keypoints_conf[9]
-                        right_wrist_conf = keypoints_conf[10]
+                        left_shoulder_conf, right_shoulder_conf = keypoints_conf[5], keypoints_conf[6]
+                        left_hip_conf, right_hip_conf = keypoints_conf[11], keypoints_conf[12]
+                        left_wrist_conf, right_wrist_conf = keypoints_conf[9], keypoints_conf[10]
 
-                        # POSE-BASED OCCUPANCY: Check left hand raised to chest/mid-body level
-                        left_hand_raised = False
-                        if left_shoulder_conf > 0.5 and left_hip_conf > 0.5 and left_wrist_conf > 0.5:
-                            chest_y_l = (left_shoulder[1] + left_hip[1]) / 2.0
-                            if left_wrist[1] < chest_y_l and left_wrist[0] > 0 and left_wrist[1] > 0:
-                                left_hand_raised = True
+                        # Person on-screen height: a distance-invariant scale for the hysteresis margins
+                        body_scale = max(1.0, float(detection.get("y2", 0)) - float(detection.get("y1", 0)))
 
-                        # POSE-BASED OCCUPANCY: Check right hand raised to chest/mid-body level
-                        right_hand_raised = False
-                        if right_shoulder_conf > 0.5 and right_hip_conf > 0.5 and right_wrist_conf > 0.5:
-                            chest_y_r = (right_shoulder[1] + right_hip[1]) / 2.0
-                            if right_wrist[1] < chest_y_r and right_wrist[0] > 0 and right_wrist[1] > 0:
-                                right_hand_raised = True
+                        # HAND-RAISE TOGGLE: How far a wrist is above its reference line (positive = above).
+                        # Primary reference is the shoulder; if the shoulder is not confident (far/door
+                        # circles where it drops out of frame) fall back to the hip. Returns None if the
+                        # hand can't be evaluated this frame.
+                        def _raise_amount(wrist, wrist_conf, shoulder, shoulder_conf, hip, hip_conf):
+                            if wrist_conf <= 0.5 or wrist[0] <= 0 or wrist[1] <= 0:
+                                return None
+                            if shoulder_conf > 0.5:
+                                ref_y = shoulder[1]
+                            elif hip_conf > 0.5:
+                                ref_y = hip[1] - 0.15 * body_scale
+                            else:
+                                return None
+                            return ref_y - wrist[1]
 
-                        # POSE-BASED OCCUPANCY: Add standing years to video array if hand raise is detected
-                        if (left_hand_raised or right_hand_raised) and standing_years:
-                            for y in standing_years:
-                                if y not in self.video_years:
-                                    self.video_years.append(y)
-                                    logging.info(f"POSE-BASED OCCUPANCY: Year {y} added to video array (chest-level hand-raise)")
+                        amounts = [a for a in (
+                            _raise_amount(left_wrist, left_wrist_conf, left_shoulder, left_shoulder_conf, left_hip, left_hip_conf),
+                            _raise_amount(right_wrist, right_wrist_conf, right_shoulder, right_shoulder_conf, right_hip, right_hip_conf),
+                        ) if a is not None]
+                        raise_amount = max(amounts) if amounts else None
 
-                        # POSE-BASED OCCUPANCY: Track right wrist coordinate history for swipe detection
-                        if track is not None and right_wrist_conf > 0.5 and right_wrist[0] > 0 and right_wrist[1] > 0:
-                            current_time = time.time()
-                            track.right_wrist_history.append((right_wrist[0], right_wrist[1], current_time))
-                            # Keep only history from the last 0.8 seconds to avoid stale calculations
-                            track.right_wrist_history = [
-                                item for item in track.right_wrist_history
-                                if current_time - item[2] <= 0.8
-                            ]
+                        # HAND-RAISE TOGGLE: Edge-triggered per-person state machine.
+                        if track is not None and raise_amount is not None:
+                            up_margin = 0.03 * body_scale    # must clear the line by this much to count as up
+                            down_margin = 0.10 * body_scale  # must drop this far below to re-arm (hysteresis)
+                            if raise_amount > up_margin:
+                                track.hand_currently_up = True
+                            elif raise_amount < -down_margin:
+                                track.hand_currently_up = False
+                            # else: dead-zone -> keep previous state to avoid flicker near the line
 
-                            # POSE-BASED OCCUPANCY: Detect horizontal swipe (large X diff, small Y diff, short time window)
-                            if len(track.right_wrist_history) >= 5:
-                                oldest = track.right_wrist_history[0]
-                                newest = track.right_wrist_history[-1]
-                                dx_swipe = newest[0] - oldest[0]
-                                dy_swipe = newest[1] - oldest[1]
-                                dt_swipe = newest[2] - oldest[2]
-
-                                if 0.05 < dt_swipe < 0.6:
-                                    if abs(dx_swipe) > 120 and abs(dy_swipe) < 80:
-                                        # POSE-BASED OCCUPANCY: Right swipe detected, clear history to prevent multiple triggers
-                                        track.right_wrist_history = []
+                            now = time.time()
+                            if track.hand_currently_up:
+                                if track.toggle_armed:
+                                    if track.hand_up_since is None:
+                                        track.hand_up_since = now
+                                    elif (now - track.hand_up_since >= config.HAND_RAISE_HOLD_TIME
+                                          and now - track.last_toggle_time >= config.HAND_RAISE_COOLDOWN
+                                          and standing_years):
+                                        # HAND-RAISE TOGGLE: Flip each standing year in/out of the video array
                                         for y in standing_years:
                                             if y in self.video_years:
                                                 self.video_years.remove(y)
-                                                logging.info(f"POSE-BASED OCCUPANCY: Year {y} removed from video array (right swipe)")
+                                                logging.info(f"HAND-RAISE TOGGLE: Year {y} removed from video array (hand raise)")
+                                            else:
+                                                self.video_years.append(y)
+                                                logging.info(f"HAND-RAISE TOGGLE: Year {y} added to video array (hand raise)")
+                                        track.last_toggle_time = now
+                                        track.toggle_armed = False   # must lower the hand before toggling again
+                                        track.hand_up_since = None
+                            else:
+                                # Hand lowered -> re-arm for the next toggle
+                                track.toggle_armed = True
+                                track.hand_up_since = None
 
             # POSE-BASED OCCUPANCY: Standard fallback to bounding box bottom-center if pose is unavailable/low confidence
             if not used_pose:

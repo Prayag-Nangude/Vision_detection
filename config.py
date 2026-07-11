@@ -95,6 +95,11 @@ FLOOR_POSITION_LINE_THICKNESS: int = 3
 FLOOR_TRACKER_MAX_DISTANCE: float = 120.0
 FLOOR_TRACKER_TIMEOUT: float = 1.5
 
+# HAND-RAISE TOGGLE: Single-hand-raise gesture that toggles the standing year(s) in/out of the video array.
+# A hand counts as raised when the wrist rises above the shoulder line (hip fallback at far circles).
+HAND_RAISE_HOLD_TIME: float = 0.8   # seconds the hand must stay raised to register ONE toggle
+HAND_RAISE_COOLDOWN: float = 1.5    # seconds before the same person can toggle again
+
 # ANTIGRAVITY ADDITION: Config settings for restricting gesture detection to a specific bounding box (Second Branch)
 # Placed to the left of the 2011 circle (center: 2100, 1280) and shifted upwards
 GESTURE_ZONE_RECT: tuple[int, int, int, int] = tuple(GESTURE_ZONE_RECT_LIST)  # (x_min, y_min, x_max, y_max)
