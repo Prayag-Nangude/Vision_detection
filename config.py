@@ -100,6 +100,11 @@ FLOOR_TRACKER_TIMEOUT: float = 1.5
 HAND_RAISE_HOLD_TIME: float = 0.8   # seconds the hand must stay raised to register ONE toggle
 HAND_RAISE_COOLDOWN: float = 1.5    # seconds before the same person can toggle again
 
+# VIDEO/OCCUPANCY FALLBACK: A year stays in the video array only while the person remains on its circle.
+# Once the year has been absent from occupancy for this many seconds (grace period to survive brief
+# detection flicker), it is auto-removed from the video array so stepping off the circle un-pauses it.
+VIDEO_OCCUPANCY_GRACE: float = 1.5
+
 # ANTIGRAVITY ADDITION: Config settings for restricting gesture detection to a specific bounding box (Second Branch)
 # Placed to the left of the 2011 circle (center: 2100, 1280) and shifted upwards
 GESTURE_ZONE_RECT: tuple[int, int, int, int] = tuple(GESTURE_ZONE_RECT_LIST)  # (x_min, y_min, x_max, y_max)

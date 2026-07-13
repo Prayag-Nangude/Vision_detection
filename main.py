@@ -325,6 +325,8 @@ class FloorPositionDetector:
         self.gesture_state: int = 0
         # POSE-BASED OCCUPANCY: Array representing occupied years where a chest-level hand-raise gesture is active (video stopped)
         self.video_years: List[int] = []
+        # VIDEO/OCCUPANCY FALLBACK: Last time each video-array year was still seen in occupancy (for grace-period cleanup)
+        self.video_year_last_seen: Dict[int, float] = {}
         self.hand_previously_raised: bool = False
         # ANTIGRAVITY ADDITION: Track whether a person and/or hand is inside the gesture zone
         self.person_in_gesture_zone: bool = False
@@ -599,6 +601,19 @@ class FloorPositionDetector:
                 logging.warning("Error checking finger gesture: %s", exc)
 
         self.occupied_positions = sorted(occupied)
+
+        # VIDEO/OCCUPANCY FALLBACK: Keep the video array a subset of occupancy. While a year is still
+        # occupied its last-seen time is refreshed; once it has been absent from occupancy for longer
+        # than the grace period (survives brief detection flicker) it is auto-removed from the video
+        # array, so a person stepping off a circle un-pauses that year even without a hand-raise.
+        for year in list(self.video_years):
+            if year in occupied:
+                self.video_year_last_seen[year] = current_time
+            elif current_time - self.video_year_last_seen.get(year, current_time) > config.VIDEO_OCCUPANCY_GRACE:
+                self.video_years.remove(year)
+                self.video_year_last_seen.pop(year, None)
+                logging.info(f"VIDEO/OCCUPANCY FALLBACK: Year {year} removed from video array (left circle > {config.VIDEO_OCCUPANCY_GRACE}s)")
+
         return self.occupied_positions
 
     def draw_floor_positions(self, frame: np.ndarray) -> None:
