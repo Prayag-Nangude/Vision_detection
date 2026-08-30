@@ -112,3 +112,18 @@ GESTURE_ZONE_DEFAULT_COLOR: tuple[int, int, int] = (200, 200, 200)       # Grey 
 GESTURE_ZONE_PERSON_COLOR: tuple[int, int, int] = (255, 0, 0)            # Blue (person inside zone)
 GESTURE_ZONE_ACTIVE_COLOR: tuple[int, int, int] = (34, 197, 94)          # Green (gesture detected)
 GESTURE_ZONE_THICKNESS: int = 3
+# NAMASTE GESTURE (YOLO-POSE): Folded-hands greeting detected from body keypoints only
+# (wrists/shoulders/elbows) -- no MediaPipe, no cropping. Runs alongside and completely
+# independent of the finger-count sequence and the hand-raise toggle; writes to no existing state.
+NAMASTE_ENABLED: bool = True
+NAMASTE_OBSERVE_ONLY: bool = True       # Phase 1: report via /status + overlay only, drive nothing
+NAMASTE_REQUIRE_ZONE: bool = True       # Person's box must overlap GESTURE_ZONE_RECT to be eligible
+NAMASTE_WRIST_RATIO: float = 0.35       # wrist_dist / shoulder_width below this = hands together
+NAMASTE_HEIGHT_ABOVE: float = 0.60      # Wrist midpoint no higher than shoulder_y - this * shoulder_width
+NAMASTE_HEIGHT_BELOW: float = 0.50      # ...and no lower than shoulder_y + this * shoulder_width
+NAMASTE_MIDLINE_TOL: float = 0.40       # Wrist midpoint must stay near the body midline
+NAMASTE_MIN_SHOULDER_PX: float = 30.0   # Reject people too far away to judge reliably
+NAMASTE_KP_CONF: float = 0.5            # Min keypoint confidence to trust a joint
+NAMASTE_HOLD_TIME: float = 0.7          # Seconds of accumulated matching pose before it registers
+NAMASTE_DECAY_RATE: float = 0.5         # Score decay rate while the pose is not matching
+NAMASTE_COOLDOWN: float = 1.5           # Seconds before the same person can register again

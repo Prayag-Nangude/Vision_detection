@@ -269,6 +269,12 @@ class TrackedPerson:
     hand_up_since: Optional[float] = None    # Timestamp the current (armed) raise began; None when down/consumed
     toggle_armed: bool = True                # True when ready to accept a new raise (re-armed after lowering)
     last_toggle_time: float = 0.0            # Timestamp of the last toggle (for cooldown)
+    # NAMASTE GESTURE (YOLO-POSE): Per-person state for the folded-hands detector. A leaky
+    # accumulator rather than a consecutive-frame count, because only ~54% of frames yield
+    # confident wrist+shoulder keypoints at this camera distance.
+    namaste_score: float = 0.0               # Accumulated seconds of matching pose
+    namaste_armed: bool = True               # True when ready to register again (re-armed at score 0)
+    last_namaste_time: float = 0.0           # Timestamp of the last registration (for cooldown)
 
 
 class PersonTracker:
@@ -337,7 +343,12 @@ class FloorPositionDetector:
         self.stable_count_frames: int = 0                  # Frame count for debouncing
         self.last_hand_seen_time: float = 0.0              # Timestamp of last frame with a hand
         self.last_sequence_time: float = 0.0               # Timestamp of the start of the current sequence
- 
+        # NAMASTE GESTURE (YOLO-POSE): Detector output. Observe-only in Phase 1 -- reported via
+        # /status and the overlay, but it drives no other state.
+        self.namaste_active: bool = False                  # True while at least one person holds the pose
+        self.namaste_ids: List[int] = []                   # Track IDs currently holding the pose
+        self.last_namaste_update: float = 0.0              # Timestamp of the previous namaste pass (for dt)
+
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
@@ -614,7 +625,136 @@ class FloorPositionDetector:
                 self.video_year_last_seen.pop(year, None)
                 logging.info(f"VIDEO/OCCUPANCY FALLBACK: Year {year} removed from video array (left circle > {config.VIDEO_OCCUPANCY_GRACE}s)")
 
+        # NAMASTE GESTURE (YOLO-POSE): Independent observe-only detector. Deliberately runs last,
+        # on already-finished data, and writes only to namaste_* state -- so it cannot influence
+        # occupancy, the video array, the gesture sequence or anything else computed above.
+        # Uses the caller's timestamp (as PersonTracker.assign_ids does) rather than a fresh
+        # time.time(), so behaviour is identical live but reproducible under offline replay.
+        self._update_namaste(person_detections, timestamp)
+
         return self.occupied_positions
+
+    def _is_namaste_pose(self, keypoints: List[Any], keypoints_conf: List[Any]) -> Optional[bool]:
+        """NAMASTE GESTURE (YOLO-POSE): Geometric test for a folded-hands greeting.
+
+        Returns True/False when the pose can be judged from this frame, or None when the required
+        keypoints are missing or too low-confidence. None means "no reading" -- the caller freezes
+        the score rather than decaying it, so dropouts never punish a correctly held pose.
+        """
+        if len(keypoints) <= 16 or len(keypoints_conf) <= 16:
+            return None
+
+        conf_min = config.NAMASTE_KP_CONF
+        left_shoulder, right_shoulder = keypoints[5], keypoints[6]
+        left_elbow, right_elbow = keypoints[7], keypoints[8]
+        left_wrist, right_wrist = keypoints[9], keypoints[10]
+
+        # Both shoulders and both wrists must be confident, otherwise there is nothing to judge
+        if min(keypoints_conf[5], keypoints_conf[6], keypoints_conf[9], keypoints_conf[10]) <= conf_min:
+            return None
+
+        # Shoulder width is the person's own scale, making every threshold distance-invariant
+        shoulder_width = hypot(left_shoulder[0] - right_shoulder[0], left_shoulder[1] - right_shoulder[1])
+        if shoulder_width < config.NAMASTE_MIN_SHOULDER_PX:
+            return None
+
+        # 1. Convergence: the wrists come together. Measured at 0.44 minimum across ordinary
+        #    movement in this camera, so the 0.35 threshold sits below the natural floor.
+        wrist_distance = hypot(left_wrist[0] - right_wrist[0], left_wrist[1] - right_wrist[1])
+        if wrist_distance / shoulder_width >= config.NAMASTE_WRIST_RATIO:
+            return False
+
+        shoulder_mid_x = (left_shoulder[0] + right_shoulder[0]) / 2.0
+        shoulder_mid_y = (left_shoulder[1] + right_shoulder[1]) / 2.0
+        wrist_mid_x = (left_wrist[0] + right_wrist[0]) / 2.0
+        wrist_mid_y = (left_wrist[1] + right_wrist[1]) / 2.0
+
+        # 2. Height: hands held at chest/chin level. This is what rejects hands clasped at the waist.
+        if not (shoulder_mid_y - config.NAMASTE_HEIGHT_ABOVE * shoulder_width
+                <= wrist_mid_y
+                <= shoulder_mid_y + config.NAMASTE_HEIGHT_BELOW * shoulder_width):
+            return False
+
+        # 3. Midline: a namaste is held centred on the body, not off to one side
+        if abs(wrist_mid_x - shoulder_mid_x) > config.NAMASTE_MIDLINE_TOL * shoulder_width:
+            return False
+
+        # 4. Elbow flare: elbows sit wider apart than the wrists. Applied only when both elbows are
+        #    confident -- skipped rather than failed, so it never costs an otherwise valid detection.
+        if min(keypoints_conf[7], keypoints_conf[8]) > conf_min:
+            if hypot(left_elbow[0] - right_elbow[0], left_elbow[1] - right_elbow[1]) <= wrist_distance:
+                return False
+
+        return True
+
+    def _update_namaste(self, person_detections: List[Dict[str, Any]], timestamp: float) -> None:
+        """NAMASTE GESTURE (YOLO-POSE): Per-person leaky-accumulator latch over _is_namaste_pose.
+
+        Writes ONLY to namaste_* state (per-track and per-detector). It never touches occupancy,
+        video_years, gesture_state or the gesture sequence. The whole body is guarded so that a
+        fault in here can never break the detection pipeline.
+        """
+        if not config.NAMASTE_ENABLED:
+            return
+
+        try:
+            # Elapsed time since the previous pass, clamped so a stall cannot dump a huge delta
+            # into the score. The first call yields 0.0.
+            delta = timestamp - self.last_namaste_update if self.last_namaste_update else 0.0
+            delta = max(0.0, min(delta, 0.5))
+            self.last_namaste_update = timestamp
+
+            rect_x_min, rect_y_min, rect_x_max, rect_y_max = self.gesture_zone_rect
+            active_ids: List[int] = []
+
+            for detection in person_detections:
+                track_id = detection.get("track_id")
+                if track_id is None:
+                    continue
+                track = self.tracker.tracks.get(track_id)
+                if track is None:
+                    continue
+
+                # Zone gate. Unlike the MediaPipe finger path this never crops the image, so only
+                # the person's position matters -- their hands may be anywhere on their body.
+                if config.NAMASTE_REQUIRE_ZONE:
+                    x1 = float(detection.get("x1", 0))
+                    y1 = float(detection.get("y1", 0))
+                    x2 = float(detection.get("x2", 0))
+                    y2 = float(detection.get("y2", 0))
+                    if x2 < rect_x_min or x1 > rect_x_max or y2 < rect_y_min or y1 > rect_y_max:
+                        continue
+
+                keypoints = detection.get("keypoints")
+                keypoints_conf = detection.get("keypoints_conf")
+                if keypoints is None or keypoints_conf is None:
+                    continue
+
+                matched = self._is_namaste_pose(keypoints, keypoints_conf)
+
+                if matched is None:
+                    pass  # No reading this frame: freeze the score instead of decaying it
+                elif matched:
+                    track.namaste_score = min(track.namaste_score + delta, config.NAMASTE_HOLD_TIME * 1.5)
+                else:
+                    track.namaste_score = max(0.0, track.namaste_score - delta * config.NAMASTE_DECAY_RATE)
+
+                if track.namaste_score <= 0.0:
+                    track.namaste_armed = True
+
+                if track.namaste_score >= config.NAMASTE_HOLD_TIME:
+                    active_ids.append(track_id)
+                    if track.namaste_armed and timestamp - track.last_namaste_time >= config.NAMASTE_COOLDOWN:
+                        track.namaste_armed = False
+                        track.last_namaste_time = timestamp
+                        logging.info(f"NAMASTE GESTURE: Detected for person ID {track_id}")
+                        # Phase 1 is observe-only: no side effects are applied. Any future action
+                        # belongs here, gated on config.NAMASTE_OBSERVE_ONLY being False.
+
+            self.namaste_ids = sorted(active_ids)
+            self.namaste_active = bool(active_ids)
+        except Exception as exc:
+            logging.warning("Error checking namaste gesture: %s", exc)
 
     def draw_floor_positions(self, frame: np.ndarray) -> None:
         # ANTIGRAVITY ADDITION: Draw the gesture detection zone rectangle and its label on the frame (with Grey -> Blue -> Green state colors)
@@ -1416,6 +1556,9 @@ class DetectionApp:
                 "gesture": self.floor_position_detector.gesture_state,
                 # POSE-BASED OCCUPANCY: Return the array of years where video has been stopped by hand gesture
                 "video": self.floor_position_detector.video_years,
+                # NAMASTE GESTURE (YOLO-POSE): Observe-only report; drives nothing in Phase 1
+                "namaste": self.floor_position_detector.namaste_active,
+                "namaste_ids": self.floor_position_detector.namaste_ids,
                 "model": self.processor.model_path,
             }
 
@@ -1571,6 +1714,8 @@ class DetectionApp:
             f"Gesture: {self.floor_position_detector.gesture_state}",
             # POSE-BASED OCCUPANCY: Draw the active video stopped years array on the frame overlay
             f"Video: {self.floor_position_detector.video_years}",
+            # NAMASTE GESTURE (YOLO-POSE): Observe-only readout for on-site testing
+            f"Namaste: {self.floor_position_detector.namaste_active}",
             f"Time: {timestamp}",
         ]
 
