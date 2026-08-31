@@ -748,8 +748,15 @@ class FloorPositionDetector:
                         track.namaste_armed = False
                         track.last_namaste_time = timestamp
                         logging.info(f"NAMASTE GESTURE: Detected for person ID {track_id}")
-                        # Phase 1 is observe-only: no side effects are applied. Any future action
-                        # belongs here, gated on config.NAMASTE_OBSERVE_ONLY being False.
+                        # NAMASTE GESTURE: Publish the dedicated gesture state. This is the only
+                        # place namaste writes to shared state, and it only ever assigns -- the
+                        # finger-count sequences never read gesture_state, so they are unaffected
+                        # and can still set 0/1/2 exactly as before. Like the existing state 2,
+                        # this latches until a finger sequence changes it ([4,3] -> 0, [3,4] -> 1).
+                        if not config.NAMASTE_OBSERVE_ONLY:
+                            if self.gesture_state != config.NAMASTE_GESTURE_VALUE:
+                                self.gesture_state = config.NAMASTE_GESTURE_VALUE
+                                logging.info(f"Gesture state set to: {config.NAMASTE_GESTURE_VALUE} (namaste detected)")
 
             self.namaste_ids = sorted(active_ids)
             self.namaste_active = bool(active_ids)
